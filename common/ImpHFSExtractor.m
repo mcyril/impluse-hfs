@@ -116,8 +116,8 @@
 
 	ImpVolumeProbe *_Nonnull const probe = [[ImpVolumeProbe alloc] initWithFileDescriptor:readFD];
 	[probe findVolumes:^(const u_int64_t startOffsetInBytes, const u_int64_t lengthInBytes, Class  _Nullable const __unsafe_unretained volumeClass) {
-		if (volumeClass != Nil && ! ([volumeClass isSubclassOfClass:[ImpHFSSourceVolume class]] || [volumeClass isSubclassOfClass:[ImpHFSPlusSourceVolume class]])) {
-			//We only extract from HFS volumes. Skip.
+		if (volumeClass == Nil || ! ([volumeClass isSubclassOfClass:[ImpHFSSourceVolume class]] || [volumeClass isSubclassOfClass:[ImpHFSPlusSourceVolume class]])) {
+			//We only extract from HFS volumes (and need a concrete class to instantiate). Skip.
 			return;
 		}
 

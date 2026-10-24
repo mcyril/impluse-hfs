@@ -92,7 +92,7 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	return self;
 }
 
-- (NSData *_Nonnull const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull)pascalString {
+- (NSData *_Nullable const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull)pascalString {
 	//The length in MacRoman characters may include accented characters that HFS+ decomposition will decompose to a base character and a combining character, so we actually need to double the length *in characters*.
 	ByteCount outputPayloadSizeInBytes = (2 * *pascalString) * sizeof(UniChar);
 	//TECConvertText documentation: “Always allocate a buffer at least 32 bytes long.”
@@ -132,7 +132,11 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	return unicodeData;
 }
 - (NSString *_Nonnull const) stringForPascalString:(ConstStr31Param _Nonnull)pascalString {
-	NSData *_Nonnull const unicodeData = [self hfsUniStr255ForPascalString:pascalString];
+	NSData *_Nullable const unicodeData = [self hfsUniStr255ForPascalString:pascalString];
+	if (unicodeData == nil) {
+		//Conversion to Unicode failed; return an empty string rather than dereferencing a NULL .bytes pointer below.
+		return @"";
+	}
 	/* This does not seem to work.
 	 hfsUniStr255ForPascalString: needs to return UTF-16 BE so we can write it out to HFS+. But if we call CFStringCreateWithPascalString, it seems to always take the host-least-significant byte and treat it as a *byte count*. That basically means this always returns an empty string. If the length is unswapped, it returns the first half of the string.
 	NSString *_Nonnull const unicodeString = (__bridge_transfer NSString *)CFStringCreateWithPascalString(kCFAllocatorDefault, unicodeData.bytes, kCFStringEncodingUTF16BE);
@@ -419,7 +423,8 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 
 	ImpTextEncodingConverter *_Nonnull const tec = self.sourceVolume.textEncodingConverter;
 	if (! [tec convertPascalString:srcThreadPtr->nodeName intoHFSUniStr255:&(destThreadPtr->nodeName) bufferSize:sizeof(destThreadPtr->nodeName)]) {
-		return nil;
+		//Name couldn't be converted to Unicode (the failure is already logged by convertPascalString:). Leave the node name empty (the buffer is zeroed) rather than returning nil, which the caller (-convertHFSCatalogFile:) does not check and would crash on. This keeps the thread record consistent with the empty key produced by -convertHFSCatalogKey:toHFSPlus: on the same failure.
+		S(destThreadPtr->nodeName.length, 0);
 	}
 
 	S(destThreadPtr->recordType, L(srcThreadPtr->recordType) == kHFSFolderThreadRecord ? kHFSPlusFolderThreadRecord : kHFSPlusFileThreadRecord);
@@ -599,7 +604,10 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 				self.sourceVolume = srcVol;
 
 				u_int64_t const totalSizeOfSourceBlocks = self.sourceVolume.numberOfBytesPerBlock * self.sourceVolume.numberOfBlocksTotal;
-				u_int64_t const destinationLengthInBytes = MAX(lengthInBytes, totalSizeOfSourceBlocks);
+				//Size the destination with headroom. HFS+ metadata (Unicode catalog records, the allocation bitmap, and a second copy of the volume header) is larger than HFS's, so a full or nearly-full HFS source does not fit into an equal-sized HFS+ volume. Add 10% (minimum 8 MiB). The unused tail compresses away in a UDZO/UDBZ .dmg, so this costs essentially nothing in the final image.
+				u_int64_t const baseLength = MAX(lengthInBytes, totalSizeOfSourceBlocks);
+				u_int64_t const destinationHeadroom = MAX((u_int64_t)(8u * 1024u * 1024u), baseLength / 10u);
+				u_int64_t const destinationLengthInBytes = baseLength + destinationHeadroom;
 				//TODO: Need to determine the right destination class by some dynamic means (including based on a --file-system argument).
 				self.destinationVolume = [[ImpHFSPlusDestinationVolume alloc] initForWritingToFileDescriptor:self->_writeFD
 					startAtOffset:startOffsetInBytes

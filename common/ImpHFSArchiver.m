@@ -64,6 +64,15 @@ ImpArchiveVolumeFormat _Nullable const ImpArchiveVolumeFormatFromString(NSString
 	bool const isHFSPlus = (_volumeFormat == ImpArchiveVolumeFormatHFSPlus);
 	bool const isHFSClassic = (_volumeFormat == ImpArchiveVolumeFormatHFSClassic);
 
+	if (! isHFSPlus) {
+		//Several steps below are guarded only by NSAssert(isHFSPlus, …), which is compiled out in Release (NS_BLOCK_ASSERTIONS); without this real check, archiving to HFS Classic would proceed with a nil destination volume and crash. Refuse it explicitly until HFS Classic archiving is implemented.
+		NSError *_Nonnull const unsupportedError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFeatureUnsupportedError userInfo:@{ NSLocalizedDescriptionKey: NSLocalizedString(@"Archiving to HFS (Classic) is not yet supported; only HFS+ output is implemented.", @"") }];
+		if (outError != NULL) {
+			*outError = unsupportedError;
+		}
+		return false;
+	}
+
 	if (isHFSPlus) {
 		catalogVersion = ImpBTreeVersionHFSPlusCatalog;
 		catBytesPerNode = BTreeNodeLengthHFSPlusCatalogMinimum;
@@ -102,7 +111,7 @@ ImpArchiveVolumeFormat _Nullable const ImpArchiveVolumeFormatFromString(NSString
 		}
 		return false;
 	}
-	rootDirItem.name = self.volumeName ?: rootDirURL.lastPathComponent;
+	rootDirItem.name = self.volumeName ?: rootDirURL.lastPathComponent ?: @"Untitled";
 	NSParameterAssert(rootDirItem.name != nil);
 	rootDirItem.assignedItemID = kHFSRootFolderID;
 
@@ -335,6 +344,14 @@ ImpArchiveVolumeFormat _Nullable const ImpArchiveVolumeFormatFromString(NSString
 	//In HFS Classic, it will need to be populated with the encoding used for each item's name.
 
 	NSAssert(isHFSPlus, @"This part doesn't support HFS Classic yet");
+	if (hfsPlusVol == nil) {
+		//Guaranteed non-nil by the isHFSPlus guard at the top of this method, but make it explicit so we never dereference a nil volume header pointer in Release (where the NSAssert above is compiled out).
+		NSError *_Nonnull const noDestVolError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFeatureUnsupportedError userInfo:@{ NSLocalizedDescriptionKey: NSLocalizedString(@"Internal error: no HFS+ destination volume to archive into.", @"") }];
+		if (outError != NULL) {
+			*outError = noDestVolError;
+		}
+		return false;
+	}
 	struct HFSPlusVolumeHeader *_Nonnull const vh = [hfsPlusVol mutableVolumeHeaderPointer];
 	S(vh->signature, kHFSPlusSigWord);
 	S(vh->version, kHFSPlusVersion);

@@ -69,9 +69,10 @@
 ///Returns true if the characters were successfully converted; returns false if some characters could not be converted or there wasn't enough space. If maxLength is not 0, the string will be truncated to this many input characters if the length byte is greater than this number, as if the length byte had been this number instead.
 - (bool) convertPascalString:(ConstStr31Param _Nonnull const)pascalString maxLength:(u_int8_t const)maxInputLength  intoHFSUniStr255:(HFSUniStr255 *_Nonnull const)outUnicode bufferSize:(ByteCount)outputBufferSizeInBytes;
 
-- (NSData *_Nonnull const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull const)pascalString maxLength:(u_int8_t const)maxLength;
+///Returns nil if the bytes can't be converted to Unicode in this converter's text encoding.
+- (NSData *_Nullable const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull const)pascalString maxLength:(u_int8_t const)maxLength;
 ///Equivalent to hfsUniStr255ForPascalString:pascalString maxLength:31.
-- (NSData *_Nonnull const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull const)pascalString;
+- (NSData *_Nullable const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull const)pascalString;
 
 - (NSString *_Nonnull const) stringForPascalString:(ConstStr31Param _Nonnull const)pascalString maxLength:(u_int8_t const)maxLength;
 - (NSString *_Nonnull const) stringForPascalString:(ConstStr31Param _Nonnull const)pascalString fromHFSCatalogKey:(struct HFSCatalogKey const *_Nonnull const)keyPtr;

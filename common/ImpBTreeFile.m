@@ -497,30 +497,33 @@
 			NSAssert(nextSearchNode.nodeType == kBTIndexNode || nextSearchNode.nodeType == kBTLeafNode, @"Index node %@ claimed that %@ was a descendant and a better match for this search", indexNode, nextSearchNode);
 		}
 
-		if (nextSearchNode != nil) {
+		//Must be a leaf node. For an empty tree (e.g. an extents overflow file with no overflow records), the header record's rootNode is 0, and -[ImpBTreeHeaderNode rootNode] resolves node #0—which is the header node itself, not a leaf. Searching it for keyed records would make -recordKeyDataAtIndex: return nil and crash the comparator on a NULL key pointer. Requiring a leaf node here treats the empty/malformed tree as “not found”.
+		if (nextSearchNode != nil && nextSearchNode.nodeType == kBTLeafNode) {
 //			ImpPrintf(@"5. Presumptive leaf node is #%u at height %u. Searching for records…", nextSearchNode.nodeNumber, (unsigned)nextSearchNode.nodeHeight);
 
-			//Should be a leaf node.
 			int16_t const recordIdx = [nextSearchNode indexOfBestMatchingRecord:compareKeys];
 //			ImpPrintf(@"6. Best matching record is #%u", recordIdx);
 
-			//TODO: If outItemRecordData is non-NULL, we need a file or folder record—a thread record will not do.
-			//We'll need to look before or after this record for a non-thread record. It might not be in this node. It might not even be in this catalog (although I'm not sure what it would mean for a catalog to have a thread record but no file or folder record—is that possible when items are deleted?).
+			//indexOfBestMatchingRecord: returns -1 when the quarry sorts before every record in the node (or the node is empty), which means the item simply isn't in the tree. Guard against it so we don't call -recordKeyDataAtIndex: with a negative index and then dereference a NULL .bytes pointer in the comparator.
+			if (recordIdx >= 0) {
+				//TODO: If outItemRecordData is non-NULL, we need a file or folder record—a thread record will not do.
+				//We'll need to look before or after this record for a non-thread record. It might not be in this node. It might not even be in this catalog (although I'm not sure what it would mean for a catalog to have a thread record but no file or folder record—is that possible when items are deleted?).
 
-			NSData *_Nonnull const recordKeyData = [nextSearchNode recordKeyDataAtIndex:recordIdx];
-			ImpBTreeComparisonResult const comparisonResult = compareKeys(recordKeyData.bytes);
-			if (comparisonResult != ImpBTreeComparisonQuarryIsEqual) {
-//				ImpPrintf(@"Not an exact match. Bummer.");
-			}
-			if (comparisonResult == ImpBTreeComparisonQuarryIsEqual) {
-//				ImpPrintf(@"This is a match!!!");
-				if (outNode != NULL) {
-					*outNode = nextSearchNode;
+				NSData *_Nonnull const recordKeyData = [nextSearchNode recordKeyDataAtIndex:recordIdx];
+				ImpBTreeComparisonResult const comparisonResult = compareKeys(recordKeyData.bytes);
+				if (comparisonResult != ImpBTreeComparisonQuarryIsEqual) {
+//					ImpPrintf(@"Not an exact match. Bummer.");
 				}
-				if (outRecordIdx != NULL) {
-					*outRecordIdx = recordIdx;
+				if (comparisonResult == ImpBTreeComparisonQuarryIsEqual) {
+//					ImpPrintf(@"This is a match!!!");
+					if (outNode != NULL) {
+						*outNode = nextSearchNode;
+					}
+					if (outRecordIdx != NULL) {
+						*outRecordIdx = recordIdx;
+					}
+					return true;
 				}
-				return true;
 			}
 		}
 	}

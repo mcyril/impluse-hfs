@@ -29,7 +29,7 @@
 @implementation ImpBTreeNode
 {
 	NSData *_nodeData;
-	NSMutableArray <NSData *> *_Nonnull _recordCache;
+	NSMutableArray <NSData *> *_Nullable _recordCache; //nil when not yet built or after invalidation; lazily (re)built in -recordDataAtIndex:.
 	bool _dataIsMutable;
 }
 
@@ -523,7 +523,7 @@
 	return recordData;
 }
 - (NSData *_Nonnull) recordDataAtIndex_nocache:(u_int16_t)idx {
-	BTreeNodeOffset thisRecordOffset;
+	BTreeNodeOffset thisRecordOffset = 0;
 	u_int16_t length = 0;
 	[self forRecordAtIndex:idx getItsOffset:&thisRecordOffset andLength:&length];
 //	ImpPrintf(@"%@Node #%u: Record at index %u starts at offset %u and runs for %u bytes", self.byteRange.length ? [NSString stringWithFormat:@"(Byte offset +0x%04lx) ", self.byteRange.location + thisRecordOffset] : @"", (unsigned)self.nodeNumber, (unsigned)idx, (unsigned)thisRecordOffset, (unsigned)length);
@@ -718,7 +718,7 @@
 }
 
 - (NSMutableData *_Nonnull) mutableRecordDataAtIndex:(u_int16_t)idx {
-	BTreeNodeOffset thisRecordOffset;
+	BTreeNodeOffset thisRecordOffset = 0;
 	u_int16_t length = 0;
 	[self forRecordAtIndex:idx getItsOffset:&thisRecordOffset andLength:&length];
 //	void *_Nonnull const mutableBytes = [(NSMutableData *)_nodeData mutableBytes];
@@ -751,6 +751,7 @@
 	void *_Nonnull const mutableBytes = mutableRecordData.mutableBytes;
 	u_int16_t const *_Nonnull const existingKeyLengthPtr = mutableBytes;
 	NSAssert(L(*existingKeyLengthPtr) == L(*newKeyLengthPtr), @"Resizing records is not yet implemented; can't change key length from %u to %u", L(*existingKeyLengthPtr), L(*newKeyLengthPtr));
+	(void)newKeyLengthPtr; (void)existingKeyLengthPtr; //Referenced only by NSAssert, which is compiled out in Release.
 
 	[keyData getBytes:mutableBytes length:keyData.length];
 }
@@ -837,8 +838,8 @@
 	u_int16_t const oldNumRecords = self.numberOfRecords;
 	u_int16_t const newRecordIdx = oldNumRecords;
 
-	BTreeNodeOffset offsetOfEmptySpace;
-	u_int16_t lengthOfEmptySpace = lengthOfEmptySpace;
+	BTreeNodeOffset offsetOfEmptySpace = 0;
+	u_int16_t lengthOfEmptySpace = 0; //Was `= lengthOfEmptySpace` (self-init reading garbage); both are out-params filled by the call below.
 	[self forRecordAtIndex:newRecordIdx getItsOffset:&offsetOfEmptySpace andLength:&lengthOfEmptySpace];
 
 	if ((data.length + sizeof(BTreeNodeOffset)) > lengthOfEmptySpace) {

@@ -318,9 +318,19 @@
 		return false;
 	}
 
-	off_t const readStart = self.startOffsetInBytes + self.offsetOfFirstAllocationBlock + startBlock * self.numberOfBytesPerBlock;
+	u_int32_t const bytesPerBlock = (u_int32_t)self.numberOfBytesPerBlock;
+	if (bytesPerBlock == 0) {
+		//A zero block size means the volume header is missing or corrupt. Bail out rather than dividing by zero below.
+		NSError *_Nonnull const zeroBlockSizeError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: NSLocalizedString(@"Volume's allocation block size is zero; the volume header is missing or corrupt.", @"") }];
+		if (outError != NULL) {
+			*outError = zeroBlockSizeError;
+		}
+		return false;
+	}
+
+	off_t const readStart = self.startOffsetInBytes + self.offsetOfFirstAllocationBlock + startBlock * bytesPerBlock;
 	size_t const numBytesToRead = intoData.length - offset;
-	size_t const numBlocksToRead = ImpCeilingDivide(intoData.length, self.numberOfBytesPerBlock);
+	size_t const numBlocksToRead = ImpCeilingDivide(intoData.length, bytesPerBlock);
 	if (_blocksThatAreAllocatedButWereNotAccessed != NULL) {
 		CFBitVectorSetBits(_blocksThatAreAllocatedButWereNotAccessed, (CFRange) { startBlock, numBlocksToRead }, false);
 	}

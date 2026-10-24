@@ -254,12 +254,12 @@ enum {
 
 	ByteCount const outputPayloadSizeInBytes = outputBufferSizeInBytes - 1 * sizeof(UniChar);
 	ByteCount actualOutputLengthInBytes = 0;
-	OSStatus err = ConvertFromPStringToUnicode(_ttui, pascalString, outputPayloadSizeInBytes, &actualOutputLengthInBytes, outputBuf);
+	OSStatus err = ConvertFromPStringToUnicode(_ttui, inputStringPtr, outputPayloadSizeInBytes, &actualOutputLengthInBytes, outputBuf);
 
 	if (err == paramErr) {
 		//Set a breakpoint here to try to step into ConvertFromPStringToUnicode.
 		NSLog(@"Unicode conversion failure!");
-		err = ConvertFromPStringToUnicode(_ttui, pascalString, outputPayloadSizeInBytes, &actualOutputLengthInBytes, outputBuf);
+		err = ConvertFromPStringToUnicode(_ttui, inputStringPtr, outputPayloadSizeInBytes, &actualOutputLengthInBytes, outputBuf);
 	}
 
 	if (err == noErr) {
@@ -285,7 +285,7 @@ enum {
 	return [self convertPascalString:pascalString maxLength:0 intoHFSUniStr255:outUnicode bufferSize:outputBufferSizeInBytes];
 }
 
-- (NSData *_Nonnull const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull const)pascalString maxLength:(u_int8_t const)maxLength {
+- (NSData *_Nullable const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull const)pascalString maxLength:(u_int8_t const)maxLength {
 	ByteCount const outputBufferSizeInBytes = [self estimateSizeOfHFSUniStr255NeededForPascalString:pascalString maxLength:maxLength];
 	NSMutableData *_Nonnull const unicodeData = [NSMutableData dataWithLength:outputBufferSizeInBytes];
 
@@ -299,12 +299,16 @@ enum {
 
 	return converted ? unicodeData : nil;
 }
-- (NSData *_Nonnull const)hfsUniStr255ForPascalString:(ConstStr31Param)pascalString {
+- (NSData *_Nullable const)hfsUniStr255ForPascalString:(ConstStr31Param)pascalString {
 	return [self hfsUniStr255ForPascalString:pascalString maxLength:31];
 }
 
 - (NSString *_Nonnull const) stringForPascalString:(ConstStr31Param)pascalString maxLength:(const u_int8_t)maxLength {
-	NSData *_Nonnull const unicodeData = [self hfsUniStr255ForPascalString:pascalString maxLength:maxLength];
+	NSData *_Nullable const unicodeData = [self hfsUniStr255ForPascalString:pascalString maxLength:maxLength];
+	if (unicodeData == nil) {
+		//Conversion to Unicode failed (e.g. the bytes aren't valid in this volume's text encoding). Return an empty string rather than dereferencing a NULL .bytes pointer below, which would crash.
+		return @"";
+	}
 	/* This does not seem to work.
 	 hfsUniStr255ForPascalString: needs to return UTF-16 BE so we can write it out to HFS+. But if we call CFStringCreateWithPascalString, it seems to always take the host-least-significant byte and treat it as a *byte count*. That basically means this always returns an empty string. If the length is unswapped, it returns the first half of the string.
 	NSString *_Nonnull const unicodeString = (__bridge_transfer NSString *)CFStringCreateWithPascalString(kCFAllocatorDefault, unicodeData.bytes, kCFStringEncodingUTF16BE);

@@ -138,6 +138,7 @@
 //	ImpPrintf(@"Extents overflow file will be %llu bytes in %u blocks", L(vh->extentsFile.logicalSize), L(vh->extentsFile.totalBlocks));
 
 	__block bool copiedEverything = true;
+	__block NSError *_Nullable conversionError = nil;
 	bool const copyForkData = self.copyForkData;
 	NSData *_Nullable const placeholderForkData = copyForkData ? nil : self.placeholderForkData;
 
@@ -145,15 +146,28 @@
 	[srcCatalog walkLeafNodes:^bool(ImpBTreeNode *const _Nonnull srcLeafNode) {
 		__block bool keepGoing = true;
 		[srcLeafNode forEachHFSCatalogRecord_file:^(const struct HFSCatalogKey *const  _Nonnull keyPtr, const struct HFSCatalogFile *const _Nonnull fileRec) {
-			struct HFSPlusCatalogKey convertedKey;
-			[self convertHFSCatalogKey:keyPtr toHFSPlus:&convertedKey];
+			//Zero-initialize: if convertHFSCatalogKey:toHFSPlus: fails partway through, we must not search the catalog with a half-filled-in (garbage) key.
+			struct HFSPlusCatalogKey convertedKey = { 0 };
+			NSString *_Nonnull const srcFilename = [srcVol.textEncodingConverter stringForPascalString:keyPtr->nodeName fromHFSCatalogKey:keyPtr];
+			if ([self convertHFSCatalogKey:keyPtr toHFSPlus:&convertedKey] == 0) {
+				//We couldn't convert this file's name to Unicode (most likely the volume uses a text encoding other than the one we're decoding with), so we can't look it up in the converted catalog. Bail out rather than search with, and later dereference, an unpopulated key.
+				conversionError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Could not convert the name of file “%@” (in parent ID %u) to Unicode. The volume may use a text encoding other than the one selected.", @"Conversion failure message"), [srcVol.textEncodingConverter stringByEscapingString:srcFilename], L(keyPtr->parentID)] }];
+				copiedEverything = false;
+				keepGoing = false;
+				return;
+			}
 
 			struct HFSUniStr255 *_Nonnull const unicodeNamePtr = &convertedKey.nodeName;
-			NSString *_Nonnull const srcFilename = [srcVol.textEncodingConverter stringForPascalString:keyPtr->nodeName fromHFSCatalogKey:keyPtr];
 			NSString *_Nonnull const dstFilename = [dstVol.textEncodingConverter stringFromHFSUniStr255:unicodeNamePtr];
 
 			ImpBTreeCursor *_Nullable const cursor = [destCatalog searchCatalogTreeForItemWithParentID:convertedKey.parentID unicodeName:unicodeNamePtr];
-			NSAssert(cursor != nil, @"Could not find file “%@” in parent ID %u in the converted catalog, and thus could not copy the file's contents", [srcVol.textEncodingConverter stringFromHFSUniStr255:unicodeNamePtr], L(convertedKey.parentID));
+			if (cursor == nil) {
+				//The file exists in the source catalog, but we couldn't find its record in the converted catalog. Without that record we have nowhere to write the file's extents, so bail out instead of dereferencing a NULL record pointer (which previously crashed in -allocateBytes:forFork:populateExtentRecord:).
+				conversionError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Could not find file “%@” in parent ID %u in the converted catalog, and thus could not copy the file's contents.", @"Conversion failure message"), [dstVol.textEncodingConverter stringByEscapingString:dstFilename], L(convertedKey.parentID)] }];
+				copiedEverything = false;
+				keepGoing = false;
+				return;
+			}
 			NSMutableData *_Nonnull const convertedFileRecData = [[cursor payloadData] mutableCopy];
 			struct HFSPlusCatalogFile *_Nonnull const convertedFilePtr = convertedFileRecData.mutableBytes;
 
@@ -162,17 +176,22 @@
 
 			//Copy the data fork.
 			u_int64_t const dataLogicalLength = L(fileRec->dataLogicalSize);
-			u_int64_t const dataPhysicalLength = L(fileRec->dataPhysicalSize);
 			u_int64_t const rsrcLogicalLength = L(fileRec->rsrcLogicalSize);
-			u_int64_t const rsrcPhysicalLength = L(fileRec->rsrcPhysicalSize);
 
 			struct HFSExtentDescriptor const *_Nonnull const firstDataExtents = fileRec->dataExtents;
 			struct HFSExtentDescriptor const *_Nonnull const firstRsrcExtents = fileRec->rsrcExtents;
 //			ImpPrintf(@"Before copy: This file's lengths in the input volume are DF %llu bytes, RF %llu bytes. Physical sizes %u blocks + %u blocks = %u blocks", dataLogicalLength, rsrcLogicalLength, ImpNumberOfBlocksInHFSExtentRecord(firstDataExtents), ImpNumberOfBlocksInHFSExtentRecord(firstRsrcExtents), ImpNumberOfBlocksInHFSExtentRecord(firstDataExtents) + ImpNumberOfBlocksInHFSExtentRecord(firstRsrcExtents));
 
-			u_int64_t bytesNotYetAllocatedForData = [hfsPlusVol allocateBytes:dataPhysicalLength forFork:ImpForkTypeData populateExtentRecord:convertedFilePtr->dataFork.extents];
+			//Allocate by *logical* length (rounded up to whole destination allocation blocks), not the source's physical length. The source's physical size includes slack to fill its (often much larger) allocation blocks; carrying that slack into HFS+ wastes space and can overflow the volume. HFS+ stores exactly ceil(logicalSize / blockSize) blocks per fork.
+			u_int64_t bytesNotYetAllocatedForData = [hfsPlusVol allocateBytes:dataLogicalLength forFork:ImpForkTypeData populateExtentRecord:convertedFilePtr->dataFork.extents];
 			//TODO: Handle bytesNotYetAllocated > 0 (by inserting the fork into the extents overflow file)
-			NSAssert(bytesNotYetAllocatedForData == 0, @"Failed to allocate %llu contiguous bytes in destination volume; ended up with %llu left over", dataLogicalLength, bytesNotYetAllocatedForData);
+			if (bytesNotYetAllocatedForData != 0) {
+				//Out of space on the destination volume. NSAssert is compiled out in Release, so without this real check the conversion would silently write a truncated/corrupt fork and still report success. Fail loudly instead.
+				conversionError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteOutOfSpaceError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Ran out of space converting the data fork of “%@”: needed %llu more bytes. The destination HFS+ volume (sized to match the source) is too small to hold the source's contents plus HFS+ metadata. This commonly happens with full or nearly-full source volumes.", @"Conversion failure message"), [dstVol.textEncodingConverter stringByEscapingString:dstFilename], bytesNotYetAllocatedForData] }];
+				copiedEverything = false;
+				keepGoing = false;
+				return;
+			}
 //			ImpPrintf(@"Allocated for data fork: #%u to #%u", L(convertedFilePtr->dataFork.extents[0].startBlock), L(convertedFilePtr->dataFork.extents[0].startBlock) + L(convertedFilePtr->dataFork.extents[0].blockCount));
 
 			NSError *_Nullable dataReadError = nil;
@@ -180,6 +199,7 @@
 			ImpVirtualFileHandle *_Nonnull const dataFH = [dstVol fileHandleForWritingToExtents:convertedFilePtr->dataFork.extents];
 			__block u_int64_t totalDataBytesWritten = 0;
 			__block u_int32_t totalDataBlocksRead = 0;
+			__block u_int64_t dataLogicalRemaining = dataLogicalLength;
 
 			[hfsVol forEachExtentInFileWithID:L(fileRec->fileID)
 				fork:ImpForkTypeData
@@ -191,11 +211,18 @@
 //				ImpPrintf(@"Read file data: %lu physical bytes (%llu length remaining)", fileData.length, logicalLength);
 				NSUInteger const numBlocksThisRead = ImpCeilingDivide(fileData.length, bytesPerSourceABlock);
 				totalDataBlocksRead += numBlocksThisRead;
-				NSInteger const bytesWrittenThisTime = [dataFH writeData:copyForkData ? fileData : [placeholderForkData times_Imp:numBlocksThisRead] error:&dataWriteError];
+				//Write only the logical bytes, dropping the source's allocation-block slack. The destination fork was sized to the logical length, so writing the full physical chunk would overrun it.
+				NSData *_Nonnull const sourceChunk = copyForkData ? fileData : [placeholderForkData times_Imp:numBlocksThisRead];
+				NSData *_Nonnull const dataToWrite = ((u_int64_t)sourceChunk.length > dataLogicalRemaining)
+					? [sourceChunk subdataWithRange:(NSRange){ 0, (NSUInteger)dataLogicalRemaining }]
+					: sourceChunk;
+				NSInteger const bytesWrittenThisTime = [dataFH writeData:dataToWrite error:&dataWriteError];
 //				ImpPrintf(@"Wrote file data: %ld bytes", (long)bytesWrittenThisTime);
 				if (bytesWrittenThisTime >= 0) {
 					totalDataBytesWritten += bytesWrittenThisTime;
+					dataLogicalRemaining -= MIN(dataLogicalRemaining, (u_int64_t)bytesWrittenThisTime);
 //					ImpPrintf(@"Total written so far: %llu bytes", totalDataBytesWritten);
+					//Always report success: the read loop already stops on its own once forkLogicalLength bytes have been consumed. (Returning false here would make -forEachExtentInFileWithID: log "Consumer block consumed no bytes" and treat it as an early stop.)
 					return true;
 				} else {
 					copiedEverything = false;
@@ -205,7 +232,7 @@
 			[dataFH closeFile];
 
 //			ImpPrintf(@"Final tally: Wrote %llu out of %llu bytes", totalDataBytesWritten, dataLogicalLength);
-			NSAssert(totalDataBytesWritten == dataPhysicalLength, @"Failed to %@ all data fork bytes due to %@: should have written %llu, but actually wrote %llu", dataReadError != nil ? @"read" : dataWriteError != nil ? @"write" : @"copy", dataReadError ?: dataWriteError, dataPhysicalLength, totalDataBytesWritten);
+			NSAssert(totalDataBytesWritten == dataLogicalLength, @"Failed to %@ all data fork bytes due to %@: should have written %llu, but actually wrote %llu", dataReadError != nil ? @"read" : dataWriteError != nil ? @"write" : @"copy", dataReadError ?: dataWriteError, dataLogicalLength, totalDataBytesWritten);
 			[self reportSourceBlocksCopied:totalDataBlocksRead];
 
 			S(convertedFilePtr->dataFork.logicalSize, dataLogicalLength);
@@ -216,9 +243,16 @@
 
 			//Copy the resource fork.
 
-			u_int64_t bytesNotYetAllocatedForRsrc = [hfsPlusVol allocateBytes:rsrcPhysicalLength forFork:ImpForkTypeResource populateExtentRecord:convertedFilePtr->resourceFork.extents];
+			//Allocate by logical length (see the data-fork note above).
+			u_int64_t bytesNotYetAllocatedForRsrc = [hfsPlusVol allocateBytes:rsrcLogicalLength forFork:ImpForkTypeResource populateExtentRecord:convertedFilePtr->resourceFork.extents];
 			//TODO: Handle bytesNotYetAllocated > 0 (by inserting the fork into the extents overflow file)
-			NSAssert(bytesNotYetAllocatedForRsrc == 0, @"Failed to allocate %llu contiguous bytes in destination volume; ended up with %llu left over", rsrcLogicalLength, bytesNotYetAllocatedForRsrc);
+			if (bytesNotYetAllocatedForRsrc != 0) {
+				//Out of space (see the data-fork case above).
+				conversionError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteOutOfSpaceError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Ran out of space converting the resource fork of “%@”: needed %llu more bytes. The destination HFS+ volume (sized to match the source) is too small to hold the source's contents plus HFS+ metadata. This commonly happens with full or nearly-full source volumes.", @"Conversion failure message"), [dstVol.textEncodingConverter stringByEscapingString:dstFilename], bytesNotYetAllocatedForRsrc] }];
+				copiedEverything = false;
+				keepGoing = false;
+				return;
+			}
 //			ImpPrintf(@"Allocated for resource fork: #%u to #%u", L(convertedFilePtr->resourceFork.extents[0].startBlock), L(convertedFilePtr->resourceFork.extents[0].startBlock) + L(convertedFilePtr->resourceFork.extents[0].blockCount));
 
 			NSError *_Nullable rsrcReadError = nil;
@@ -226,6 +260,7 @@
 			ImpVirtualFileHandle *_Nonnull const rsrcFH = [dstVol fileHandleForWritingToExtents:convertedFilePtr->resourceFork.extents];
 			__block u_int64_t totalRsrcBytesWritten = 0;
 			__block u_int32_t totalRsrcBlocksRead = 0;
+			__block u_int64_t rsrcLogicalRemaining = rsrcLogicalLength;
 
 			[hfsVol forEachExtentInFileWithID:L(fileRec->fileID)
 				fork:ImpForkTypeResource
@@ -236,9 +271,16 @@
 			{
 				NSUInteger const numBlocksThisRead = ImpCeilingDivide(fileData.length, bytesPerSourceABlock);
 				totalRsrcBlocksRead += numBlocksThisRead;
-				NSInteger const bytesWrittenThisTime = [rsrcFH writeData:copyForkData ? fileData : [placeholderForkData times_Imp:numBlocksThisRead] error:&rsrcWriteError];
+				//Write only the logical bytes (see the data-fork note above).
+				NSData *_Nonnull const sourceChunk = copyForkData ? fileData : [placeholderForkData times_Imp:numBlocksThisRead];
+				NSData *_Nonnull const dataToWrite = ((u_int64_t)sourceChunk.length > rsrcLogicalRemaining)
+					? [sourceChunk subdataWithRange:(NSRange){ 0, (NSUInteger)rsrcLogicalRemaining }]
+					: sourceChunk;
+				NSInteger const bytesWrittenThisTime = [rsrcFH writeData:dataToWrite error:&rsrcWriteError];
 				if (bytesWrittenThisTime >= 0) {
 					totalRsrcBytesWritten += bytesWrittenThisTime;
+					rsrcLogicalRemaining -= MIN(rsrcLogicalRemaining, (u_int64_t)bytesWrittenThisTime);
+					//Always report success (see the data-fork note above).
 					return true;
 				} else {
 					copiedEverything = false;
@@ -247,7 +289,7 @@
 			}];
 			[rsrcFH closeFile];
 
-			NSAssert(totalRsrcBytesWritten == rsrcPhysicalLength, @"Failed to %@ all resource fork bytes due to %@: should have written %llu, but actually wrote %llu", rsrcReadError != nil ? @"read" : rsrcWriteError != nil ? @"write" : @"copy", rsrcReadError ?: rsrcWriteError, rsrcPhysicalLength, totalRsrcBytesWritten);
+			NSAssert(totalRsrcBytesWritten == rsrcLogicalLength, @"Failed to %@ all resource fork bytes due to %@: should have written %llu, but actually wrote %llu", rsrcReadError != nil ? @"read" : rsrcWriteError != nil ? @"write" : @"copy", rsrcReadError ?: rsrcWriteError, rsrcLogicalLength, totalRsrcBytesWritten);
 
 //			ImpPrintf(@"After copy: Copied %u blocks + %u blocks = %u blocks from the input volume.", totalDataBlocksRead, totalRsrcBlocksRead, totalDataBlocksRead + totalRsrcBlocksRead);
 //			ImpPrintf(@"After copy: This file's lengths in the output volume are DF %llu bytes, RF %llu bytes. Physical sizes %llu blocks + %llu blocks = %llu blocks.", dataLogicalLength, rsrcLogicalLength, ImpNumberOfBlocksInHFSPlusExtentRecord(convertedFilePtr->dataFork.extents), ImpNumberOfBlocksInHFSPlusExtentRecord(convertedFilePtr->resourceFork.extents), ImpNumberOfBlocksInHFSPlusExtentRecord(convertedFilePtr->dataFork.extents) + ImpNumberOfBlocksInHFSPlusExtentRecord(convertedFilePtr->resourceFork.extents));
@@ -272,6 +314,13 @@
 		];
 		return keepGoing;
 	}];
+
+	if (conversionError != nil) {
+		if (outError != NULL) {
+			*outError = conversionError;
+		}
+		return false;
+	}
 
 	//One of the folders in the catalog is the root of the volume, which isn't counted in numberOfFolders, so decrement that back out.
 	--numFoldersCopied;

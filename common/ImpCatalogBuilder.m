@@ -437,7 +437,10 @@ static ImpBTreeVersion ImpGetCatalogKeyVersion(NSData *_Nonnull const keyData) {
 				[bottomRow addObject:thisMockNode];
 				++_numLiveNodes;
 
-				NSAssert([thisMockNode appendKey:kvp.key payload:kvp.value], @"Encountered catalog entry too big to fit in a catalog node: Key is %lu bytes, payload is %lu bytes, but maximal node capacity is %u bytes", kvp.key.length, kvp.value.length, nodeBodySize);
+				//IMPORTANT: The append must happen unconditionally, not inside NSAssert—NS_BLOCK_ASSERTIONS (Release builds) compiles the assertion out entirely, which would silently drop this record (the first key of each new node) from the catalog.
+				bool const appended = [thisMockNode appendKey:kvp.key payload:kvp.value];
+				NSAssert(appended, @"Encountered catalog entry too big to fit in a catalog node: Key is %lu bytes, payload is %lu bytes, but maximal node capacity is %u bytes", kvp.key.length, kvp.value.length, nodeBodySize);
+				(void)appended; //Referenced only by NSAssert, which is compiled out in Release.
 			}
 		}
 
@@ -465,7 +468,10 @@ static ImpBTreeVersion ImpGetCatalogKeyVersion(NSData *_Nonnull const keyData) {
 					[upperRow addObject:indexNodeInProgress];
 					++_numLiveNodes;
 
-					NSAssert([indexNodeInProgress appendKey:keyData fromNode:node], @"Encountered catalog entry too big to fit in a catalog index node: Key is %lu bytes, payload is %lu bytes, but maximal node capacity is %u bytes (%u already used)", keyData.length, sizeof(u_int32_t), nodeBodySize, indexNodeInProgress.totalSizeOfAllRecords);
+					//IMPORTANT: The append must happen unconditionally, not inside NSAssert—NS_BLOCK_ASSERTIONS (Release builds) compiles the assertion out entirely, which would silently drop this index record from the tree.
+					bool const appended = [indexNodeInProgress appendKey:keyData fromNode:node];
+					NSAssert(appended, @"Encountered catalog entry too big to fit in a catalog index node: Key is %lu bytes, payload is %lu bytes, but maximal node capacity is %u bytes (%u already used)", keyData.length, sizeof(u_int32_t), nodeBodySize, indexNodeInProgress.totalSizeOfAllRecords);
+					(void)appended; //Referenced only by NSAssert, which is compiled out in Release.
 				}
 			}
 
@@ -953,6 +959,7 @@ static ImpBTreeVersion ImpGetCatalogKeyVersion(NSData *_Nonnull const keyData) {
 	for (ImpCatalogKeyValuePair *_Nonnull const kvp in _allPairs) {
 		bool const appended = [realNode appendRecordWithKey:kvp.key payload:kvp.value];
 		NSAssert(appended, @"Could not append record to real node %@; it may be out of space (%u bytes remaining; key is %lu bytes and payload is %lu bytes)", realNode, realNode.numberOfBytesAvailable, kvp.key.length, kvp.value.length);
+		(void)appended; //Referenced only by NSAssert, which is compiled out in Release.
 	}
 }
 

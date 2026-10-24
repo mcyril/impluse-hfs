@@ -70,7 +70,8 @@ extern NSString *_Nonnull const ImpRescuedDataFileName;
 ///Set by concrete subclasses as part of the conversion.
 @property(strong) ImpDestinationVolume *_Nonnull destinationVolume;
 
-- (NSData *_Nonnull const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull)pascalString;
+///Returns nil if the bytes can't be converted to Unicode.
+- (NSData *_Nullable const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull)pascalString;
 - (NSString *_Nonnull const) stringForPascalString:(ConstStr31Param _Nonnull)pascalString;
 
 ///Returns the total length of the converted key, including the length field.

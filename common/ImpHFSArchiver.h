@@ -44,7 +44,7 @@ ImpArchiveVolumeFormat _Nullable const ImpArchiveVolumeFormatFromString(NSString
 @property(assign) u_int64_t volumeSizeInBytes;
 
 ///The name of the volume and its root directory. If nil, defaults to sourceRootFolder.lastPathComponent. If *that's* nil, defaults to the lastPathComponent of the only item in sourceItems. If that's non-nil, defaults to something else.
-@property(copy) NSString *_Nonnull volumeName;
+@property(copy) NSString *_Nullable volumeName;
 
 ///The file system to create. Defaults to ImpArchiveVolumeFormatHFSClassic.
 @property(copy) ImpArchiveVolumeFormat _Nonnull volumeFormat;

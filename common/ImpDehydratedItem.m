@@ -389,7 +389,7 @@ static NSTimeInterval hfsEpochTISRD = -3061152000.0; //1904-01-01T00:00:00Z time
 	}
 
 	ImpSourceVolume *_Nonnull const srcVolume = self.sourceVolume;
-	ImpHFSSourceVolume *_Nonnull const hfsVolume = [srcVolume isKindOfClass:[ImpHFSSourceVolume class]] ? (ImpHFSSourceVolume *)srcVolume : nil;
+	ImpHFSSourceVolume *_Nullable const hfsVolume = [srcVolume isKindOfClass:[ImpHFSSourceVolume class]] ? (ImpHFSSourceVolume *)srcVolume : nil;
 	ImpHFSPlusSourceVolume *_Nullable const hfsPlusVolume = [srcVolume isKindOfClass:[ImpHFSPlusSourceVolume class]] ? (ImpHFSPlusSourceVolume *)srcVolume : nil;
 
 	NSData *_Nonnull const fileRecData = self.hfsFileCatalogRecordData;
@@ -486,7 +486,7 @@ static NSTimeInterval hfsEpochTISRD = -3061152000.0; //1904-01-01T00:00:00Z time
 	ImpSourceVolume *_Nullable const srcVolume = self.sourceVolume;
 	NSAssert(srcVolume != nil, @"Can't rehydrate a file from no volume. This is likely an internal inconsistency error and therefore a bug.");
 
-	ImpHFSSourceVolume *_Nonnull const hfsVolume = [srcVolume isKindOfClass:[ImpHFSSourceVolume class]] ? (ImpHFSSourceVolume *)srcVolume : nil;
+	ImpHFSSourceVolume *_Nullable const hfsVolume = [srcVolume isKindOfClass:[ImpHFSSourceVolume class]] ? (ImpHFSSourceVolume *)srcVolume : nil;
 	ImpHFSPlusSourceVolume *_Nullable const hfsPlusVolume = [srcVolume isKindOfClass:[ImpHFSPlusSourceVolume class]] ? (ImpHFSPlusSourceVolume *)srcVolume : nil;
 
 	struct HFSCatalogFile const *_Nonnull const fileRec = (struct HFSCatalogFile const *_Nonnull const)self.hfsFileCatalogRecordData.bytes;
@@ -717,7 +717,7 @@ static NSTimeInterval hfsEpochTISRD = -3061152000.0; //1904-01-01T00:00:00Z time
 	ImpSourceVolume *_Nullable const srcVol = self.sourceVolume;
 	NSAssert(srcVol != nil, @"Can't rehydrate a folder from no volume. This is likely an internal inconsistency error and therefore a bug.");
 
-	ImpHFSSourceVolume *_Nonnull const hfsVolume = [srcVol isKindOfClass:[ImpHFSSourceVolume class]] ? (ImpHFSSourceVolume *)srcVol : nil;
+	ImpHFSSourceVolume *_Nullable const hfsVolume = [srcVol isKindOfClass:[ImpHFSSourceVolume class]] ? (ImpHFSSourceVolume *)srcVol : nil;
 	ImpHFSPlusSourceVolume *_Nullable const hfsPlusVolume = [srcVol isKindOfClass:[ImpHFSPlusSourceVolume class]] ? (ImpHFSPlusSourceVolume *)srcVol : nil;
 	NSAssert(hfsVolume != nil, @"Can't rehydrate from non-HFS volumes yet.");
 
@@ -934,7 +934,7 @@ static NSTimeInterval hfsEpochTISRD = -3061152000.0; //1904-01-01T00:00:00Z time
 + (instancetype _Nonnull) rootDirectoryOfHFSVolume:(ImpSourceVolume *_Nonnull const)srcVol {
 	ImpBTreeFile *_Nonnull const catalog = srcVol.catalogBTree;
 
-	ImpHFSSourceVolume *_Nonnull const hfsVolume = [srcVol isKindOfClass:[ImpHFSSourceVolume class]] ? (ImpHFSSourceVolume *)srcVol : nil;
+	ImpHFSSourceVolume *_Nullable const hfsVolume = [srcVol isKindOfClass:[ImpHFSSourceVolume class]] ? (ImpHFSSourceVolume *)srcVol : nil;
 	ImpHFSPlusSourceVolume *_Nullable const hfsPlusVolume = [srcVol isKindOfClass:[ImpHFSPlusSourceVolume class]] ? (ImpHFSPlusSourceVolume *)srcVol : nil;
 
 	NSUInteger const totalNumItems = srcVol.numberOfFiles + srcVol.numberOfFolders;

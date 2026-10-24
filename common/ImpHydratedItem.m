@@ -58,7 +58,7 @@ static struct HFSUniStr255 resourceForkName = { .length = 8, .unicode = { 'R', '
 			return itemKind;
 		case S_IFLNK: {
 			struct stat orig_sb;
-			int const orig_stat_result = stat(fileURL.fileSystemRepresentation, &sb);
+			int const orig_stat_result = stat(fileURL.fileSystemRepresentation, &orig_sb);
 			if (orig_stat_result < 0) {
 				NSError *_Nonnull const statError = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{ NSLocalizedDescriptionKey: @(strerror(errno)) }];
 				if (outError != NULL) {
