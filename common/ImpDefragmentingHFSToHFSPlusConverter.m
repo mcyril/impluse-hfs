@@ -399,6 +399,9 @@
 		//The superclass sets this to 1 << self.hfsTextEncoding, which is correct IFF we have at least one file (we set all files to the same encoding).
 		//If there are no files, then no encodings are represented, so the bitmap should be 0.
 		S(vh->encodingsBitmap, 0);
+	} else {
+		//Files may use encodings other than self.hfsTextEncoding (per their extended Finder flags), so set every encoding actually used.
+		S(vh->encodingsBitmap, self.usedEncodingsBitmap);
 	}
 
 	copiedEverything = copiedEverything && wroteCatalog && wroteExtentsOverflow;

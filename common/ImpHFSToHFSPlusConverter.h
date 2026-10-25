@@ -70,6 +70,9 @@ extern NSString *_Nonnull const ImpRescuedDataFileName;
 ///Set by concrete subclasses as part of the conversion.
 @property(strong) ImpDestinationVolume *_Nonnull destinationVolume;
 
+///One bit per text encoding used by converted file records (see TN1150 encodingsBitmap). Files carry the script code from their extended Finder flags, which can differ from hfsTextEncoding.
+@property(readonly) u_int64_t usedEncodingsBitmap;
+
 ///Returns nil if the bytes can't be converted to Unicode.
 - (NSData *_Nullable const)hfsUniStr255ForPascalString:(ConstStr31Param _Nonnull)pascalString;
 - (NSString *_Nonnull const) stringForPascalString:(ConstStr31Param _Nonnull)pascalString;

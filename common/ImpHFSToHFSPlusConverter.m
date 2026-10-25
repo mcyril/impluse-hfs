@@ -38,6 +38,7 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	TextToUnicodeInfo _ttui;
 	int _readFD, _writeFD;
 	bool _hasReportedPostVolumeLength;
+	u_int64_t _usedEncodingsBitmap;
 }
 
 + (NSData *_Nonnull const) placeholderForkData {
@@ -371,6 +372,7 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	TextEncoding const embeddedScriptCode = [ImpTextEncodingConverter textEncodingFromExtendedFinderFlags:extFinderFlags defaultEncoding:self.hfsTextEncoding];
 
 	S(destFilePtr->textEncoding, embeddedScriptCode);
+	_usedEncodingsBitmap |= [self encodingsBitmapWithOneTextEncoding:embeddedScriptCode];
 	ImpZeroField(destFilePtr->reserved2);
 
 	//Don't convert extents (those will be populated when we copy the fork data), but do convert the logical sizes.
@@ -606,7 +608,10 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 				u_int64_t const totalSizeOfSourceBlocks = self.sourceVolume.numberOfBytesPerBlock * self.sourceVolume.numberOfBlocksTotal;
 				//Size the destination with headroom. HFS+ metadata (Unicode catalog records, the allocation bitmap, and a second copy of the volume header) is larger than HFS's, so a full or nearly-full HFS source does not fit into an equal-sized HFS+ volume. Add 10% (minimum 8 MiB). The unused tail compresses away in a UDZO/UDBZ .dmg, so this costs essentially nothing in the final image.
 				u_int64_t const baseLength = MAX(lengthInBytes, totalSizeOfSourceBlocks);
-				u_int64_t const destinationHeadroom = MAX((u_int64_t)(8u * 1024u * 1024u), baseLength / 10u);
+				//Round the headroom up to whole source allocation blocks so the destination length stays block-aligned; an unaligned length puts the alternate volume header off a block boundary and leaves the last block partial.
+				u_int64_t const bytesPerSourceBlock = self.sourceVolume.numberOfBytesPerBlock;
+				//Only a bare volume can grow. A volume inside a partition map keeps the source's partition map, whose entry for this volume still declares the source's size, so the destination must not exceed it.
+				u_int64_t const destinationHeadroom = startOffsetInBytes == 0 ? ImpCeilingDivide(MAX((u_int64_t)(8u * 1024u * 1024u), baseLength / 10u), bytesPerSourceBlock) * bytesPerSourceBlock : 0;
 				u_int64_t const destinationLengthInBytes = baseLength + destinationHeadroom;
 				//TODO: Need to determine the right destination class by some dynamic means (including based on a --file-system argument).
 				self.destinationVolume = [[ImpHFSPlusDestinationVolume alloc] initForWritingToFileDescriptor:self->_writeFD
@@ -715,7 +720,8 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	ImpSourceVolume *_Nonnull const srcVol = self.sourceVolume;
 	u_int64_t const numBytesBeforeEndOfVolume = srcVol.startOffsetInBytes + srcVol.lengthInBytes;
 	off_t const readPos = lseek(_readFD, numBytesBeforeEndOfVolume, SEEK_SET);
-	off_t const writePos = lseek(_writeFD, numBytesBeforeEndOfVolume, SEEK_SET);
+	//Write after the end of the destination volume, which may be longer than the source volume (see the headroom in step0_preflight).
+	off_t const writePos = lseek(_writeFD, self.destinationVolume.startOffsetInBytes + self.destinationVolume.lengthInBytes, SEEK_SET);
 
 	NSByteCountFormatter *_Nonnull const bcf = [NSByteCountFormatter new];
 	NSNumberFormatter *_Nonnull const nf = [NSNumberFormatter new];
