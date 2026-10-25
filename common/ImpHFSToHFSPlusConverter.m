@@ -39,6 +39,7 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	int _readFD, _writeFD;
 	bool _hasReportedPostVolumeLength;
 	u_int64_t _usedEncodingsBitmap;
+	NSError *_Nullable _nameConversionError;
 }
 
 + (NSData *_Nonnull const) placeholderForkData {
@@ -220,9 +221,10 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 		.attributes = 0, //mdbPtr->drAtrb (see below)
 		.lastMountedVersion = CFSwapInt32HostToBig('8.10'),
 		.journalInfoBlock = 0,
+		//TN1150: the volume header's createDate is local time (as in HFS), but every other HFS+ date is GMT.
 		.createDate = mdbPtr->drCrDate,
-		.modifyDate = mdbPtr->drLsMod,
-		.backupDate = mdbPtr->drVolBkUp,
+		.modifyDate = CFSwapInt32HostToBig([self gmtDateForHFSLocalDate:L(mdbPtr->drLsMod)]),
+		.backupDate = CFSwapInt32HostToBig([self gmtDateForHFSLocalDate:L(mdbPtr->drVolBkUp)]),
 		.checkedDate = 0,
 		.fileCount = mdbPtr->drFilCnt,
 		.folderCount = mdbPtr->drDirCnt,
@@ -309,13 +311,41 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 ///We don't actually need to zero anything in the methods that use this macro since they're writing into storage created by an NSMutableData, which already zeroed it for us. This macro basically exists to acknowledge reserved fields so they don't look like they were forgotten.
 #define ImpZeroField(dst) /*do nothing*/
 
+///HFS stores dates in local time; HFS+ stores them in GMT (except the volume header's createDate, which TN1150 says stays in local time). The source's time zone isn't recorded anywhere, so assume this machine's local time zone, as the archiver does when going the other way.
+- (u_int32_t) gmtDateForHFSLocalDate:(u_int32_t const)localDate {
+	if (localDate == 0) {
+		//Zero means “never” (e.g., never backed up). Keep it zero.
+		return 0;
+	}
+	static NSTimeInterval const hfsEpochTISRD = -3061152000.0; //1904-01-01T00:00:00Z timeIntervalSinceReferenceDate
+	NSDate *_Nonnull const date = [NSDate dateWithTimeIntervalSinceReferenceDate:localDate + hfsEpochTISRD];
+	int64_t const gmtDate = (int64_t)localDate - [[NSTimeZone localTimeZone] secondsFromGMTForDate:date];
+	if (gmtDate < 0) {
+		return 0;
+	}
+	if (gmtDate > UINT32_MAX) {
+		return UINT32_MAX;
+	}
+	return (u_int32_t)gmtDate;
+}
+
+///Record the first name that couldn't be converted to Unicode, as an error for -convertHFSCatalogFile:error: to report.
+- (void) noteNameConversionFailureForPascalString:(ConstStr31Param _Nonnull const)pascalString parentID:(HFSCatalogNodeID const)parentID {
+	if (_nameConversionError != nil) {
+		return;
+	}
+	//Show the name as MacRoman, which can represent every byte, so the item can be identified.
+	NSString *_Nonnull const macRomanName = (__bridge_transfer NSString *)CFStringCreateWithPascalString(kCFAllocatorDefault, pascalString, kCFStringEncodingMacRoman) ?: @"";
+	_nameConversionError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Could not convert the name “%@” (in parent ID %u) to Unicode using the selected text encoding. The volume may use a different encoding; try another --encoding.", @"Conversion failure message"), macRomanName, parentID] }];
+}
+
 - (NSUInteger) convertHFSCatalogKey:(struct HFSCatalogKey const *_Nonnull const)srcKeyPtr toHFSPlus:(struct HFSPlusCatalogKey *_Nonnull const)dstKeyPtr
 {
 	ImpTextEncodingConverter *_Nonnull const tec = self.sourceVolume.textEncodingConverter;
 	struct HFSUniStr255 *_Nonnull const unicodeNamePtr = &(dstKeyPtr->nodeName);
 	if (! [tec convertPascalString:srcKeyPtr->nodeName intoHFSUniStr255:unicodeNamePtr bufferSize:sizeof(dstKeyPtr->nodeName)]) {
-		//TODO: Return an error here
-		NSAssert(false, @"Failed to convert key's node name to HFSUniStr255: %@", CFStringCreateWithPascalStringNoCopy(kCFAllocatorDefault, srcKeyPtr->nodeName, kCFStringEncodingMacRoman, /*deallocator*/ kCFAllocatorNull));
+		//Remember the first failure; -convertHFSCatalogFile:error: stops and reports it. (This used to be only an NSAssert, which Release compiles out, leaving a zero-length key to corrupt the catalog.)
+		[self noteNameConversionFailureForPascalString:srcKeyPtr->nodeName parentID:L(srcKeyPtr->parentID)];
 		return 0;
 	}
 	S(dstKeyPtr->parentID, L(srcKeyPtr->parentID));
@@ -354,13 +384,14 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	S(destFilePtr->flags, L(srcFilePtr->flags));
 	ImpZeroField(destFilePtr->reserved1);
 	S(destFilePtr->fileID, L(srcFilePtr->fileID));
-	S(destFilePtr->createDate, L(srcFilePtr->createDate));
-	S(destFilePtr->contentModDate, L(srcFilePtr->modifyDate));
+	//HFS dates are local time; HFS+ catalog dates are GMT.
+	S(destFilePtr->createDate, [self gmtDateForHFSLocalDate:L(srcFilePtr->createDate)]);
+	S(destFilePtr->contentModDate, [self gmtDateForHFSLocalDate:L(srcFilePtr->modifyDate)]);
 	//TN1150 on attributeModDate: “The last date and time that any field in the file's catalog record was changed. An implementation may treat this field as reserved. In Mac OS X, the BSD APIs use this field as the file's change time (returned in the st_ctime field of struct stat). All versions of Mac OS 8 and 9 treat this field as reserved.”
 	ImpZeroField(destFilePtr->attributeModDate);
 	//TN1150 on accessDate: “The traditional Mac OS implementation of HFS Plus does not maintain the accessDate field. Files created by traditional Mac OS have an accessDate of zero.”
 	ImpZeroField(destFilePtr->accessDate);
-	S(destFilePtr->backupDate, L(srcFilePtr->backupDate));
+	S(destFilePtr->backupDate, [self gmtDateForHFSLocalDate:L(srcFilePtr->backupDate)]);
 
 	//TN1150 on bsdInfo (which it calls “permissions”): “The traditional Mac OS implementation of HFS Plus does not use the permissions field. Files created by traditional Mac OS have the entire field set to 0.”
 	ImpZeroField(destFilePtr->bsdInfo);
@@ -394,13 +425,14 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	S(destFolderPtr->flags, L(srcFolderPtr->flags));
 	S(destFolderPtr->valence, L(srcFolderPtr->valence));
 	S(destFolderPtr->folderID, L(srcFolderPtr->folderID));
-	S(destFolderPtr->createDate, L(srcFolderPtr->createDate));
-	S(destFolderPtr->contentModDate, L(srcFolderPtr->modifyDate));
+	//HFS dates are local time; HFS+ catalog dates are GMT.
+	S(destFolderPtr->createDate, [self gmtDateForHFSLocalDate:L(srcFolderPtr->createDate)]);
+	S(destFolderPtr->contentModDate, [self gmtDateForHFSLocalDate:L(srcFolderPtr->modifyDate)]);
 	//TN1150 on attributeModDate: “The last date and time that any field in the folder's catalog record was changed. An implementation may treat this field as reserved. In Mac OS X, the BSD APIs use this field as the folder's change time (returned in the st_ctime field of struct stat). All versions of Mac OS 8 and 9 treat this field as reserved.”
 	ImpZeroField(destFolderPtr->attributeModDate);
 	//TN1150 on accessDate: “The traditional Mac OS implementation of HFS Plus does not maintain the accessDate field. Folders created by traditional Mac OS have an accessDate of zero.”
 	ImpZeroField(destFolderPtr->accessDate);
-	S(destFolderPtr->backupDate, L(srcFolderPtr->backupDate));
+	S(destFolderPtr->backupDate, [self gmtDateForHFSLocalDate:L(srcFolderPtr->backupDate)]);
 
 	//TN1150 on bsdInfo (which it calls “permissions”): “The traditional Mac OS implementation of HFS Plus does not use the permissions field. Folders created by traditional Mac OS have the entire field set to 0.”
 	ImpZeroField(destFolderPtr->bsdInfo);
@@ -425,8 +457,9 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 
 	ImpTextEncodingConverter *_Nonnull const tec = self.sourceVolume.textEncodingConverter;
 	if (! [tec convertPascalString:srcThreadPtr->nodeName intoHFSUniStr255:&(destThreadPtr->nodeName) bufferSize:sizeof(destThreadPtr->nodeName)]) {
-		//Name couldn't be converted to Unicode (the failure is already logged by convertPascalString:). Leave the node name empty (the buffer is zeroed) rather than returning nil, which the caller (-convertHFSCatalogFile:) does not check and would crash on. This keeps the thread record consistent with the empty key produced by -convertHFSCatalogKey:toHFSPlus: on the same failure.
+		//Name couldn't be converted to Unicode. Leave the node name empty (the buffer is zeroed) rather than returning nil, and record the failure; -convertHFSCatalogFile:error: stops and reports it.
 		S(destThreadPtr->nodeName.length, 0);
+		[self noteNameConversionFailureForPascalString:srcThreadPtr->nodeName parentID:L(srcThreadPtr->parentID)];
 	}
 
 	S(destThreadPtr->recordType, L(srcThreadPtr->recordType) == kHFSFolderThreadRecord ? kHFSPlusFolderThreadRecord : kHFSPlusFileThreadRecord);
@@ -443,7 +476,7 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	return [ImpBTreeFile nodeSizeForVersion:ImpBTreeVersionHFSPlusCatalog];
 }
 
-- (ImpMutableBTreeFile *_Nonnull) convertHFSCatalogFile:(ImpBTreeFile *_Nonnull const)sourceTree {
+- (ImpMutableBTreeFile *_Nullable) convertHFSCatalogFile:(ImpBTreeFile *_Nonnull const)sourceTree error:(NSError *_Nullable *_Nonnull const)outError {
 	NSUInteger const numItems = self.sourceVolume.numberOfFiles + self.sourceVolume.numberOfFolders;
 	ImpCatalogBuilder *_Nonnull const catBuilder = [[ImpCatalogBuilder alloc] initWithBTreeVersion:ImpBTreeVersionHFSPlusCatalog
 		bytesPerNode:self.destinationCatalogNodeSize
@@ -458,6 +491,9 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 			NSData *_Nonnull const sourceRecData = [NSData dataWithBytesNoCopy:(void *)fileRecPtr length:sizeof(struct HFSCatalogFile) freeWhenDone:false];
 			NSMutableData *_Nonnull const destKeyData = [self convertHFSCatalogKeyToHFSPlus:sourceKeyData];
 			NSMutableData *_Nonnull const destRecData = [self convertHFSCatalogFileRecordToHFSPlus:sourceRecData];
+			if (self->_nameConversionError != nil) {
+				return;
+			}
 			ImpCatalogItem *_Nonnull const item = [catBuilder addKey:destKeyData fileRecord:destRecData];
 			item.sourceKey = sourceKeyData;
 			item.sourceRecord = sourceRecData;
@@ -467,6 +503,9 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 			NSData *_Nonnull const sourceRecData = [NSData dataWithBytesNoCopy:(void *)folderRecPtr length:sizeof(struct HFSCatalogFolder) freeWhenDone:false];
 			NSMutableData *_Nonnull const destKeyData = [self convertHFSCatalogKeyToHFSPlus:sourceKeyData];
 			NSMutableData *_Nonnull const destRecData = [self convertHFSCatalogFolderRecordToHFSPlus:sourceRecData];
+			if (self->_nameConversionError != nil) {
+				return;
+			}
 			ImpCatalogItem *_Nonnull const item = [catBuilder addKey:destKeyData folderRecord:destRecData];
 			item.sourceKey = sourceKeyData;
 			item.sourceRecord = sourceRecData;
@@ -475,13 +514,24 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 			NSData *_Nonnull const sourceRecData = [NSData dataWithBytesNoCopy:(void *)threadRecPtr length:sizeof(struct HFSCatalogThread) freeWhenDone:false];
 			NSMutableData *_Nonnull const destKeyData = [self convertHFSCatalogKeyToHFSPlus:sourceKeyData];
 			NSMutableData *_Nonnull const destRecData = [self convertHFSCatalogThreadRecordToHFSPlus:sourceRecData];
+			if (self->_nameConversionError != nil) {
+				return;
+			}
 			ImpCatalogItem *_Nonnull const item = [catBuilder addKey:destKeyData threadRecord:destRecData];
 			item.sourceThreadKey = sourceKeyData;
 			item.sourceThreadRecord = sourceRecData;
 		}];
-		return true;
+		//Stop at the first name that can't be converted: adding a zero-length key would corrupt the catalog.
+		return self->_nameConversionError == nil;
 	}];
+	if (_nameConversionError != nil) {
+		if (outError != NULL) {
+			*outError = _nameConversionError;
+		}
+		return nil;
+	}
 
+	bool createdRescuedDataFile = false;
 	if ([self.sourceVolume numberOfBlocksThatAreAllocatedButAreNotReferencedInTheBTrees] > 0) {
 		enum { HexEditCreatorCode = 'hDmp' };
 		[catBuilder createFileInParent:kHFSRootFolderID
@@ -489,6 +539,7 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 			type:'????'
 			creator:HexEditCreatorCode
 			finderFlags:kHasBeenInited | kNameLocked | kHasNoINITs];
+		createdRescuedDataFile = true;
 	}
 
 	ImpMutableBTreeFile *_Nonnull const destTree = [[ImpMutableBTreeFile alloc] initWithVersion:ImpBTreeVersionHFSPlusCatalog
@@ -503,6 +554,10 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 
 	struct HFSPlusVolumeHeader *_Nonnull const vhPtr = hfsPlusVol.mutableVolumeHeaderPointer;
 	S(vhPtr->nextCatalogID, catBuilder.nextCatalogNodeID);
+	if (createdRescuedDataFile) {
+		//The file count was copied from the source's MDB; include the file we created.
+		S(vhPtr->fileCount, L(vhPtr->fileCount) + 1);
+	}
 	if (catBuilder.hasReusedCatalogNodeIDs) {
 		S(vhPtr->attributes, L(vhPtr->attributes) | kHFSCatalogNodeIDsReusedMask);
 	} else {
@@ -624,7 +679,8 @@ NSString *_Nonnull const ImpRescuedDataFileName = @"!!! Data impluse recovered f
 	}];
 	if (! loadedSuccessfully) {
 		if (outError) {
-			*outError = volumeLoadError;
+			//If no volume was found at all, there is no load error; report the probe's error (e.g., a read failure) or say that nothing was found, rather than returning a nil error.
+			*outError = volumeLoadError ?: probe.error ?: [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: @"No HFS volume was found in the source." }];
 		}
 	}
 

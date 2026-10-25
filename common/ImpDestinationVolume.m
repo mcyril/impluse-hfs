@@ -93,7 +93,8 @@
 	 */
 
 	u_int64_t const volumeStartInBytes = self.startOffsetInBytes;
-	off_t const extentStartInBytes = L(oneExtent->startBlock) * self.numberOfBytesPerBlock;
+	//Widen before multiplying: both operands are u_int32_t, so the product would wrap for offsets past 4 GiB.
+	off_t const extentStartInBytes = (off_t)L(oneExtent->startBlock) * self.numberOfBytesPerBlock;
 //	ImpPrintf(@"Writing %lu bytes to output volume starting at a-block #%u (output file offset %llu bytes)", data.length, L(oneExtent->startBlock), volumeStartInBytes + extentStartInBytes);
 	int64_t const amtWritten = pwrite(_fileDescriptor, bytesPtr + offsetInData, bytesToWrite, volumeStartInBytes + extentStartInBytes);
 

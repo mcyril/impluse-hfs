@@ -88,6 +88,13 @@
 		return false;
 	}
 
+	if (L(_mdb->drEmbedSigWord) == kHFSPlusSigWord) {
+		//An HFS wrapper (as created by Mac OS 8.1 through 9) around an embedded HFS+ volume. The wrapper's own catalog contains only a placeholder file; the real contents are in the embedded volume, which this class can't read. Refuse rather than process the wrapper as if it were the whole volume.
+		NSError *_Nonnull const embeddedHFSPlusError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: @"This volume is an HFS wrapper around an embedded HFS+ volume. It is already HFS+, and embedded HFS+ volumes are not supported." }];
+		if (outError != NULL) *outError = embeddedHFSPlusError;
+		return false;
+	}
+
 	return true;
 }
 
@@ -154,7 +161,11 @@
 	}];
 	if (tapURL != nil) [catalogFileData writeToURL:tapURL options:0 error:NULL];
 
-	bool const successfullyReadCatalog = catalogFileData != nil && catalogFileData.length > 0;
+	//All of the catalog must have been read. A partial catalog (e.g., one extent failed to read) would otherwise load and then fail or crash when a node link points into the missing part.
+	bool const successfullyReadCatalog = catalogFileData != nil && catalogFileData.length > 0 && catalogFileData.length >= catFileLen;
+	if (! successfullyReadCatalog && outError != NULL && *outError == nil) {
+		*outError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Could only read %lu of %llu bytes of the catalog file", @""), (unsigned long)catalogFileData.length, catFileLen] }];
+	}
 	if (successfullyReadCatalog) {
 		self.catalogBTree = [[ImpBTreeFile alloc] initWithVersion:ImpBTreeVersionHFSCatalog data:catalogFileData];
 		if (self.catalogBTree == nil) {

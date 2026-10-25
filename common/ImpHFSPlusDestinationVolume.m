@@ -496,7 +496,7 @@
 	//Skip over any extents already populated.
 	u_int32_t blockCount = 0;
 	while ((blockCount = L(outExts[extentIdx].blockCount)) != 0 && extentIdx < kHFSPlusExtentDensity) {
-		u_int64_t const thisExtentInBytes = blockCount * aBlockSize;
+		u_int64_t const thisExtentInBytes = (u_int64_t)blockCount * aBlockSize;
 		if (remaining > thisExtentInBytes) {
 			remaining -= thisExtentInBytes;
 		} else {
@@ -595,7 +595,8 @@
 	NSUInteger const numABlocks = self.numberOfBlocksTotal;
 	NSMutableData *_Nonnull const bitmapData = [NSMutableData dataWithLength:ImpCeilingDivide(numABlocks, 8)];
 	CFBitVectorGetBits(_allocationsBitmap, (CFRange){ 0, numABlocks }, bitmapData.mutableBytes);
-	if (! [self writeData:bitmapData startingFrom:0 toExtents:_vh->allocationFile.extents error:outError]) {
+	//writeData:… returns a byte count, or a negative number on failure; `!` would only catch 0.
+	if ([self writeData:bitmapData startingFrom:0 toExtents:_vh->allocationFile.extents error:outError] < 0) {
 		return false;
 	}
 

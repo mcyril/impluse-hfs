@@ -403,6 +403,13 @@ static ImpBTreeVersion ImpGetCatalogKeyVersion(NSData *_Nonnull const keyData) {
 //			if (item.destinationThreadKey != nil) ImpPrintf(@"\tDestination thread key %@", [ImpBTreeNode describeHFSPlusCatalogKeyWithData:item.destinationThreadKey]);
 //			if (item.destinationThreadRecord != nil) ImpPrintf(@"\tDestination thread record %@", [ImpBTreeNode describeHFSPlusCatalogThreadRecordWithData:item.destinationThreadRecord]);
 
+			if (item.destinationKey == nil || item.destinationRecord == nil) {
+				//A thread record with no matching file or folder record (a damaged source catalog). There is nothing for it to point to, so leave it out: a pair with a nil key would crash the sort below.
+				NSData *_Nullable const threadKeyData = item.destinationThreadKey;
+				HFSCatalogNodeID const cnid = threadKeyData.length >= sizeof(u_int16_t) + sizeof(HFSCatalogNodeID) ? L(((struct HFSPlusCatalogKey const *)threadKeyData.bytes)->parentID) : 0;
+				ImpPrintf(@"Dropping a thread record for CNID %u, which has no matching file or folder record", cnid);
+				continue;
+			}
 			[_allKeyValuePairs addObject:[[ImpCatalogKeyValuePair alloc] initWithKey:item.destinationKey value:item.destinationRecord]];
 			[_allKeyValuePairs addObject:[[ImpCatalogKeyValuePair alloc] initWithKey:item.destinationThreadKey value:item.destinationThreadRecord]];
 		}
@@ -477,14 +484,16 @@ static ImpBTreeVersion ImpGetCatalogKeyVersion(NSData *_Nonnull const keyData) {
 
 			[_allMockIndexNodes addObjectsFromArray:upperRow];
 			[_mockRows insertObject:upperRow atIndex:0];
+		}
 
-			if (_largestCNIDYet < UINT32_MAX) {
-				self.nextCatalogNodeID = _largestCNIDYet + 1;
-				self.hasReusedCatalogNodeIDs = false;
-			} else {
-				self.nextCatalogNodeID = _firstUnusedCNID;
-				self.hasReusedCatalogNodeIDs = true;
-			}
+		//This must happen after the loop, not inside it: a catalog that fits in a single leaf node never enters the loop, which would leave nextCatalogNodeID at 0.
+		if (_largestCNIDYet < UINT32_MAX) {
+			//IDs below kHFSFirstUserCatalogNodeID are reserved, so a volume with nothing but its root folder must still start user IDs at 16.
+			self.nextCatalogNodeID = MAX(_largestCNIDYet + 1, (HFSCatalogNodeID)kHFSFirstUserCatalogNodeID);
+			self.hasReusedCatalogNodeIDs = false;
+		} else {
+			self.nextCatalogNodeID = _firstUnusedCNID;
+			self.hasReusedCatalogNodeIDs = true;
 		}
 
 		_treeIsBuilt = true;
@@ -575,7 +584,7 @@ static ImpBTreeVersion ImpGetCatalogKeyVersion(NSData *_Nonnull const keyData) {
 {
 	//TEMP: Stolen from -buildMockTree, where it belongs. The whole CNID-assignment mechanism needs to be reworked; it's currently very ad-hoc.
 	if (_largestCNIDYet < UINT32_MAX) {
-		self.nextCatalogNodeID = _largestCNIDYet + 1;
+		self.nextCatalogNodeID = MAX(_largestCNIDYet + 1, (HFSCatalogNodeID)kHFSFirstUserCatalogNodeID);
 		self.hasReusedCatalogNodeIDs = false;
 	} else {
 		self.nextCatalogNodeID = _firstUnusedCNID;
@@ -616,7 +625,8 @@ static ImpBTreeVersion ImpGetCatalogKeyVersion(NSData *_Nonnull const keyData) {
 		S(bsdInfo.ownerID, getuid());
 		S(bsdInfo.groupID, getgid());
 		bsdInfo.adminFlags = bsdInfo.ownerFlags = 0;
-		S(bsdInfo.fileMode, 0444);
+		//fileMode must include the file type bits; fsck_hfs rejects a mode with none ("Invalid BSD file type").
+		S(bsdInfo.fileMode, S_IFREG | 0444);
 		bsdInfo.special.linkCount = 0;
 		memcpy(&fileRecPtr->bsdInfo, &bsdInfo, sizeof(bsdInfo));
 
@@ -663,6 +673,18 @@ static ImpBTreeVersion ImpGetCatalogKeyVersion(NSData *_Nonnull const keyData) {
 		[fileThreadRecData setLength:threadRecSize];
 
 		[self addKey:fileThreadKeyData threadRecord:fileThreadRecData];
+	}
+
+	//The new file is one more item in its parent folder, whose valence was copied from the source.
+	for (ImpCatalogItem *_Nonnull const item in _allSourceItems) {
+		NSMutableData *_Nullable const recData = item.destinationRecord;
+		if (recData.length >= sizeof(struct HFSPlusCatalogFolder)) {
+			struct HFSPlusCatalogFolder *_Nonnull const folderRecPtr = recData.mutableBytes;
+			if (L(folderRecPtr->recordType) == kHFSPlusFolderRecord && L(folderRecPtr->folderID) == parentID) {
+				S(folderRecPtr->valence, L(folderRecPtr->valence) + 1);
+				break;
+			}
+		}
 	}
 
 	return cnid;

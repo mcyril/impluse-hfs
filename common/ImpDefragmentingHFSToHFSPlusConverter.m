@@ -122,7 +122,14 @@
 	[self reportSourceExtentRecordWillNotBeCopied:extentsOverflowFileSourceExtents];
 
 	ImpBTreeFile *_Nonnull const srcCatalog = srcVol.catalogBTree;
-	ImpMutableBTreeFile *_Nonnull const destCatalog = [self convertHFSCatalogFile:srcCatalog];
+	NSError *_Nullable catalogConversionError = nil;
+	ImpMutableBTreeFile *_Nullable const destCatalog = [self convertHFSCatalogFile:srcCatalog error:&catalogConversionError];
+	if (destCatalog == nil) {
+		if (outError != NULL) {
+			*outError = catalogConversionError;
+		}
+		return false;
+	}
 	[self reportSourceExtentRecordCopied:catalogFileSourceExtents];
 
 	//Allocate the special files before anything else, so they get placed first on the disk.
@@ -222,7 +229,7 @@
 					totalDataBytesWritten += bytesWrittenThisTime;
 					dataLogicalRemaining -= MIN(dataLogicalRemaining, (u_int64_t)bytesWrittenThisTime);
 //					ImpPrintf(@"Total written so far: %llu bytes", totalDataBytesWritten);
-					//Always report success: the read loop already stops on its own once forkLogicalLength bytes have been consumed. (Returning false here would make -forEachExtentInFileWithID: log "Consumer block consumed no bytes" and treat it as an early stop.)
+					//Always report success. The read loop does not stop at the logical end of the fork: an extent wholly past it is still delivered, trimmed above to zero bytes, and writing zero bytes is a no-op. (Returning false here would make -forEachExtentInFileWithID: log "Consumer block consumed no bytes" and treat it as an early stop.)
 					return true;
 				} else {
 					copiedEverything = false;
@@ -232,7 +239,13 @@
 			[dataFH closeFile];
 
 //			ImpPrintf(@"Final tally: Wrote %llu out of %llu bytes", totalDataBytesWritten, dataLogicalLength);
-			NSAssert(totalDataBytesWritten == dataLogicalLength, @"Failed to %@ all data fork bytes due to %@: should have written %llu, but actually wrote %llu", dataReadError != nil ? @"read" : dataWriteError != nil ? @"write" : @"copy", dataReadError ?: dataWriteError, dataLogicalLength, totalDataBytesWritten);
+			//This must be a real check, not an NSAssert (compiled out in Release): a read error (e.g., an extent covering a block the source's bitmap says is free, or a truncated source) leaves the fork short, and the conversion must not report success.
+			if (dataReadError != nil || dataWriteError != nil || totalDataBytesWritten != dataLogicalLength) {
+				conversionError = dataReadError ?: dataWriteError ?: [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Failed to copy all data fork bytes of “%@”: should have written %llu, but actually wrote %llu", @"Conversion failure message"), [dstVol.textEncodingConverter stringByEscapingString:dstFilename], dataLogicalLength, totalDataBytesWritten] }];
+				copiedEverything = false;
+				keepGoing = false;
+				return;
+			}
 			[self reportSourceBlocksCopied:totalDataBlocksRead];
 
 			S(convertedFilePtr->dataFork.logicalSize, dataLogicalLength);
@@ -289,7 +302,13 @@
 			}];
 			[rsrcFH closeFile];
 
-			NSAssert(totalRsrcBytesWritten == rsrcLogicalLength, @"Failed to %@ all resource fork bytes due to %@: should have written %llu, but actually wrote %llu", rsrcReadError != nil ? @"read" : rsrcWriteError != nil ? @"write" : @"copy", rsrcReadError ?: rsrcWriteError, rsrcLogicalLength, totalRsrcBytesWritten);
+			//Real check, not an NSAssert (see the data-fork note above).
+			if (rsrcReadError != nil || rsrcWriteError != nil || totalRsrcBytesWritten != rsrcLogicalLength) {
+				conversionError = rsrcReadError ?: rsrcWriteError ?: [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Failed to copy all resource fork bytes of “%@”: should have written %llu, but actually wrote %llu", @"Conversion failure message"), [dstVol.textEncodingConverter stringByEscapingString:dstFilename], rsrcLogicalLength, totalRsrcBytesWritten] }];
+				copiedEverything = false;
+				keepGoing = false;
+				return;
+			}
 
 //			ImpPrintf(@"After copy: Copied %u blocks + %u blocks = %u blocks from the input volume.", totalDataBlocksRead, totalRsrcBlocksRead, totalDataBlocksRead + totalRsrcBlocksRead);
 //			ImpPrintf(@"After copy: This file's lengths in the output volume are DF %llu bytes, RF %llu bytes. Physical sizes %llu blocks + %llu blocks = %llu blocks.", dataLogicalLength, rsrcLogicalLength, ImpNumberOfBlocksInHFSPlusExtentRecord(convertedFilePtr->dataFork.extents), ImpNumberOfBlocksInHFSPlusExtentRecord(convertedFilePtr->resourceFork.extents), ImpNumberOfBlocksInHFSPlusExtentRecord(convertedFilePtr->dataFork.extents) + ImpNumberOfBlocksInHFSPlusExtentRecord(convertedFilePtr->resourceFork.extents));
@@ -336,39 +355,81 @@
 			ImpPrintf(@"Source volume contains %lu orphaned blocks. Attempting to rescue them…", numOrphanedSrcBlocks);
 		}
 		u_int32_t const numOrphanedSrcBlocks32 = numOrphanedSrcBlocks > UINT32_MAX ? UINT32_MAX : (u_int32_t)numOrphanedSrcBlocks;
-		u_int64_t const physicalLength = numOrphanedSrcBlocks32 * srcVol.numberOfBytesPerBlock;
-		u_int32_t const numDstBlocks32 = (u_int32_t)physicalLength / dstVol.numberOfBytesPerBlock;
+		//Widen before multiplying: both operands are u_int32_t, so the product would wrap past 4 GiB.
+		u_int64_t const physicalLength = (u_int64_t)numOrphanedSrcBlocks32 * srcVol.numberOfBytesPerBlock;
+		u_int32_t const numDstBlocks32 = (u_int32_t)(physicalLength / dstVol.numberOfBytesPerBlock);
 
-		HFSPlusExtentRecord rescuedBlocksExtents;
-		struct HFSPlusExtentDescriptor const *_Nonnull const rescuedBlocksExtentsPtr = rescuedBlocksExtents;
-		bool const allocatedRescuedBlocksDataFork = [hfsPlusVol allocateBlocks:numDstBlocks32 forFork:ImpForkTypeData getExtent:rescuedBlocksExtents];
+		//Zero-initialize: -allocateBlocks:forFork:getExtent: treats a non-empty extent as an existing allocation to grow, and all eight descriptors end up in the catalog record.
+		HFSPlusExtentRecord rescuedBlocksDataExtents = { { 0 } };
+		HFSPlusExtentRecord rescuedBlocksRsrcExtents = { { 0 } };
+		struct HFSPlusExtentDescriptor const *_Nonnull const rescuedBlocksDataExtentsPtr = rescuedBlocksDataExtents;
+		struct HFSPlusExtentDescriptor const *_Nonnull const rescuedBlocksRsrcExtentsPtr = rescuedBlocksRsrcExtents;
+		bool const allocatedRescuedBlocksDataFork = [hfsPlusVol allocateBlocks:numDstBlocks32 forFork:ImpForkTypeData getExtent:rescuedBlocksDataExtents];
 		if (! allocatedRescuedBlocksDataFork) {
 			ImpPrintf(@"Failed to allocate %u blocks for the rescued blocks file.", numDstBlocks32);
 		} else {
-			ImpVirtualFileHandle *_Nonnull const orphanedBlocksFH = [dstVol fileHandleForWritingToExtents:rescuedBlocksExtents];
+			//We write the recovered data to *both* the data and resource forks, because if the recovered data is in fact a resource map (as has happened with at least one real volume!) then having it in the resource fork makes it much easier to recover it on a (real or emulated) vintage system. Each fork gets its own blocks: HFS+ does not allow two forks to share an extent.
+			bool const allocatedRescuedBlocksRsrcFork = [hfsPlusVol allocateBlocks:numDstBlocks32 forFork:ImpForkTypeResource getExtent:rescuedBlocksRsrcExtents];
+			if (! allocatedRescuedBlocksRsrcFork) {
+				ImpPrintf(@"Failed to allocate %u blocks for the rescued blocks file's resource fork; the rescued data will be in the data fork only.", numDstBlocks32);
+			}
+
+			ImpVirtualFileHandle *_Nonnull const orphanedBlocksDataFH = [dstVol fileHandleForWritingToExtents:rescuedBlocksDataExtents];
+			ImpVirtualFileHandle *_Nullable const orphanedBlocksRsrcFH = allocatedRescuedBlocksRsrcFork ? [dstVol fileHandleForWritingToExtents:rescuedBlocksRsrcExtents] : nil;
+			__block u_int64_t totalRescuedDataBytes = 0;
+			__block u_int64_t totalRescuedRsrcBytes = 0;
+			__block bool keepRescuing = true;
+			__block NSError *_Nullable rescueWriteError = nil;
 			[srcVol findExtentsThatAreAllocatedButHaveNotBeenAccessed:^(NSRange const extent) {
+				if (! keepRescuing) {
+					return;
+				}
 				struct HFSExtentDescriptor orphanedExtent;
 				S(orphanedExtent.startBlock, (u_int16_t)extent.location);
 				S(orphanedExtent.blockCount, (u_int16_t)extent.length);
-				NSData *_Nonnull const recoveredBlocks = [hfsVol readDataFromFileDescriptor:srcVol.fileDescriptor
+				NSError *_Nullable rescueReadError = nil;
+				NSData *_Nullable const recoveredBlocks = [hfsVol readDataFromFileDescriptor:srcVol.fileDescriptor
 					logicalLength:physicalLength
 					extents:&orphanedExtent
 					numExtents:1
-					error:outError];
-				[orphanedBlocksFH writeData:recoveredBlocks error:outError];
+					error:&rescueReadError];
+				if (recoveredBlocks == nil) {
+					//Rescue is best-effort: the volume's files have all been copied already. Keep what we rescued so far.
+					ImpPrintf(@"Stopped rescuing orphaned blocks: %@", rescueReadError.localizedDescription);
+					keepRescuing = false;
+					return;
+				}
+				NSInteger const dataBytesWritten = [orphanedBlocksDataFH writeData:recoveredBlocks error:&rescueWriteError];
+				NSInteger const rsrcBytesWritten = orphanedBlocksRsrcFH != nil ? [orphanedBlocksRsrcFH writeData:recoveredBlocks error:&rescueWriteError] : 0;
+				if (dataBytesWritten < 0 || rsrcBytesWritten < 0) {
+					keepRescuing = false;
+					return;
+				}
+				totalRescuedDataBytes += dataBytesWritten;
+				totalRescuedRsrcBytes += rsrcBytesWritten;
 			}];
-			[orphanedBlocksFH closeFile];
-			//We set this extent as the data for *both* the data and resource forks, because if the recovered data is in fact a resource map (as has happened with at least one real volume!) then having it in the resource fork makes it much easier to recover it on a (real or emulated) vintage system.
-			[destCatalog setExtentRecord:rescuedBlocksExtentsPtr
+			[orphanedBlocksDataFH closeFile];
+			[orphanedBlocksRsrcFH closeFile];
+			if (rescueWriteError != nil) {
+				if (outError != NULL) {
+					*outError = rescueWriteError;
+				}
+				return false;
+			}
+
+			//The logical lengths are what was actually written, which is less than the allocation if a read stopped the rescue early or the allocation was partial.
+			[destCatalog setExtentRecord:rescuedBlocksDataExtentsPtr
 				forFork:ImpForkTypeData
 				ofCatalogItemInParentID:kHFSRootFolderID
 				withName:ImpRescuedDataFileName
-				setLogicalLength:physicalLength];
-			[destCatalog setExtentRecord:rescuedBlocksExtentsPtr
-				forFork:ImpForkTypeResource
-				ofCatalogItemInParentID:kHFSRootFolderID
-				withName:ImpRescuedDataFileName
-				setLogicalLength:physicalLength];
+				setLogicalLength:totalRescuedDataBytes];
+			if (allocatedRescuedBlocksRsrcFork) {
+				[destCatalog setExtentRecord:rescuedBlocksRsrcExtentsPtr
+					forFork:ImpForkTypeResource
+					ofCatalogItemInParentID:kHFSRootFolderID
+					withName:ImpRescuedDataFileName
+					setLogicalLength:totalRescuedRsrcBytes];
+			}
 		}
 	}
 
@@ -380,7 +441,8 @@
 	__block NSError *_Nullable catWriteError = nil;
 	[destCatalog serializeToData:^(NSData *const  _Nonnull data) {
 		ImpVirtualFileHandle *_Nonnull const catFH = [dstVol fileHandleForWritingToExtents:vh->catalogFile.extents];
-		wroteCatalog = [catFH writeData:data error:&catWriteError];
+		//Compare against the length: writeData:error: returns a byte count, or a negative number on failure, which would convert to true as a bool.
+		wroteCatalog = [catFH writeData:data error:&catWriteError] == (NSInteger)data.length;
 		[catFH closeFile];
 	}];
 
@@ -388,7 +450,7 @@
 	__block NSError *_Nullable extWriteError = nil;
 	[destExtentsOverflow serializeToData:^(NSData *const  _Nonnull data) {
 		ImpVirtualFileHandle *_Nonnull const extFH = [dstVol fileHandleForWritingToExtents:vh->extentsFile.extents];
-		wroteExtentsOverflow = [extFH writeData:data error:&extWriteError];
+		wroteExtentsOverflow = [extFH writeData:data error:&extWriteError] == (NSInteger)data.length;
 		[extFH closeFile];
 	}];
 
@@ -405,6 +467,11 @@
 	}
 
 	copiedEverything = copiedEverything && wroteCatalog && wroteExtentsOverflow;
+	if (! (wroteCatalog && wroteExtentsOverflow)) {
+		if (outError != NULL) {
+			*outError = (wroteCatalog ? extWriteError : catWriteError) ?: [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteUnknownError userInfo:@{ NSLocalizedDescriptionKey: wroteCatalog ? NSLocalizedString(@"Could not write the whole extents overflow file", @"Conversion failure message") : NSLocalizedString(@"Could not write the whole catalog file", @"Conversion failure message") }];
+		}
+	}
 
 	[srcVol reportBlocksThatAreAllocatedButHaveNotBeenAccessed];
 

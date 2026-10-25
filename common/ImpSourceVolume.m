@@ -301,21 +301,22 @@
 	error:(NSError *_Nullable *_Nonnull const)outError
 {
 	int32_t firstUnallocatedBlockNumber = -1;
+	u_int32_t numUnallocatedBlocks = 0;
 	//TODO: Optimize using CFBitVectorGetCountOfBit (start range at startBlock, check returned count >= blockCount)
 	for (u_int16_t i = 0; i < blockCount; ++i) {
 //		ImpPrintf(@"- #%u: %@", startBlock + i, CFBitVectorGetBitAtIndex(_bitVector, startBlock + i) ? @"YES" : @"NO!");
 		if (! [self isBlockAllocated:startBlock + i]) {
-			firstUnallocatedBlockNumber = startBlock + i;
+			if (firstUnallocatedBlockNumber < 0) {
+				firstUnallocatedBlockNumber = startBlock + i;
+			}
+			++numUnallocatedBlocks;
 		}
 	}
 //	ImpPrintf(@"Extent starting at %u is fully allocated before reading: %@", startBlock, (firstUnallocatedBlockNumber < 0) ? @"YES" : @"NO");
 	if (firstUnallocatedBlockNumber > -1) {
-		//It's possible that this should be a warning, or that its level of fatality should be adjustable (particularly in situations of data recovery).
-		NSError *_Nonnull const readingIntoTheVoidError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Attempt to read block #%u, which is unallocated; this may indicate a bug in this program, or that the volume itself was corrupt (please save a copy of it using bzip2)", @""), firstUnallocatedBlockNumber] }];
-		if (outError != NULL) {
-			*outError = readingIntoTheVoidError;
-		}
-		return false;
+		//The catalog's extent says these blocks belong to a file, but the allocation bitmap says they're free. A volume that was read without complaint can still have a stale bitmap; the extent is the authority for where the file's data is, so read it anyway (refusing would lose data that is intact on disk) and warn.
+		//(This used to be an error: "Attempt to read block #%u, which is unallocated; this may indicate a bug in this program, or that the volume itself was corrupt (please save a copy of it using bzip2)".)
+		ImpPrintf(@"Warning: extent { start #%u, %u blocks } includes %u block(s) starting at #%d that the volume's allocation bitmap marks as free. The bitmap may be out of date; reading the data anyway.", (unsigned)startBlock, (unsigned)blockCount, (unsigned)numUnallocatedBlocks, firstUnallocatedBlockNumber);
 	}
 
 	u_int32_t const bytesPerBlock = (u_int32_t)self.numberOfBytesPerBlock;
@@ -328,7 +329,8 @@
 		return false;
 	}
 
-	off_t const readStart = self.startOffsetInBytes + self.offsetOfFirstAllocationBlock + startBlock * bytesPerBlock;
+	//Widen before multiplying: both operands are u_int32_t, so the product would wrap for offsets past 4 GiB.
+	off_t const readStart = self.startOffsetInBytes + self.offsetOfFirstAllocationBlock + (off_t)startBlock * bytesPerBlock;
 	size_t const numBytesToRead = intoData.length - offset;
 	size_t const numBlocksToRead = ImpCeilingDivide(intoData.length, bytesPerBlock);
 	if (_blocksThatAreAllocatedButWereNotAccessed != NULL) {
@@ -346,6 +348,16 @@
 		NSError *_Nonnull const readFailedError = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to read data from extent { start #%u, %u blocks }", (unsigned)startBlock, (unsigned)blockCount ] }];
 		if (outError != NULL) {
 			*outError = readFailedError;
+		}
+		return false;
+	}
+	//A short read means the source ends before this extent does (e.g., a truncated image). Treat it as a failure: otherwise the unread tail of the buffer would be passed on as if it were the extent's contents.
+	size_t const numBytesInExtent = (size_t)blockCount * bytesPerBlock;
+	size_t const numBytesExpected = numBytesToRead < numBytesInExtent ? numBytesToRead : numBytesInExtent;
+	if ((size_t)amtRead < numBytesExpected) {
+		NSError *_Nonnull const shortReadError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Unexpected end of file reading extent { start #%u, %u blocks }: got %zd of %zu bytes. The source may be truncated.", (unsigned)startBlock, (unsigned)blockCount, amtRead, numBytesExpected ] }];
+		if (outError != NULL) {
+			*outError = shortReadError;
 		}
 		return false;
 	}

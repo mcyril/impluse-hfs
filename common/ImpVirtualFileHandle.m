@@ -109,7 +109,7 @@
 		firstExtent.startBlock = wholeExtent->startBlock; //Not swapped because we're copying as-is
 		firstExtent.blockCount = wholeExtent->blockCount; //Not swapped because we're copying as-is
 		secondExtent = (struct HFSPlusExtentDescriptor){ 0, 0 };
-		u_int64_t const numBytesAssignedToAnExtent = L(firstExtent.blockCount) * aBlockSizeInBytes;
+		u_int64_t const numBytesAssignedToAnExtent = (u_int64_t)L(firstExtent.blockCount) * aBlockSizeInBytes;
 		dividendInBytes = numBytesAssignedToAnExtent;
 		remainderBytes = dataLengthInBytes - numBytesAssignedToAnExtent;
 	}
@@ -122,6 +122,10 @@
 
 - (NSInteger) writeData:(NSData *_Nonnull const)data error:(NSError *_Nullable *_Nonnull const)outError {
 	NSInteger bytesWrittenSoFar = 0;
+	if (data.length == 0) {
+		//Nothing to write. (Without this check, a leftover partial block would be rewritten and counted against this empty data, and the loop below would then index past its end.)
+		return 0;
+	}
 
 	NSAssert([_backingVolume isKindOfClass:[ImpHFSPlusDestinationVolume class]], @"impluse bug: Can't write to destination volumes that aren't HFS+ (yet…)");
 	ImpHFSPlusDestinationVolume *_Nonnull const hfsPlusVol = (ImpHFSPlusDestinationVolume *)_backingVolume;
@@ -129,7 +133,7 @@
 	//If we have a leftover partial block, re-write it with some or all of this data appended.
 	//If this data still isn't enough to fill out the block, then we need to leave it appended for the next write's benefit.
 	//If we did append enough to fill out a block, then we can empty the leftover bucket and advance the extent by 1 block, to either write out the rest of this data (if there is any) or the next data (if there is any).
-	NSUInteger offsetIntoData = 0;
+	//bytesWrittenSoFar counts bytes of *this* data consumed, so it can be used as an index into data. The leftover bytes rewritten from the previous call don't count.
 	NSUInteger const numBytesLeftOver = dataNotYetWritten.length;
 	NSUInteger const numBytesRemainingInBlock = _blockSize - numBytesLeftOver;
 	if (numBytesLeftOver > 0) {
@@ -139,14 +143,14 @@
 		};
 		NSData *_Nonnull const firstPortion = [data dangerouslyFastSubdataWithRange_Imp:rangeOfFirstPortion];
 		[dataNotYetWritten appendData:firstPortion];
-		NSInteger bytesWrittenThisTime = [hfsPlusVol writeData:dataNotYetWritten startingFrom:bytesWrittenSoFar toExtent:&_remainderOfCurrentExtent error:outError];
+		NSInteger bytesWrittenThisTime = [hfsPlusVol writeData:dataNotYetWritten startingFrom:0 toExtent:&_remainderOfCurrentExtent error:outError];
 		if (bytesWrittenThisTime < 0) {
 			bytesWrittenSoFar = bytesWrittenThisTime;
 		} else {
-			bytesWrittenSoFar += bytesWrittenThisTime;
-			offsetIntoData += rangeOfFirstPortion.length;
+			bytesWrittenSoFar += rangeOfFirstPortion.length;
 
-			if (rangeOfFirstPortion.length == _blockSize) {
+			//The block is full when leftover + appended portion reach the block size. (This used to compare only the appended portion, which can never be a whole block when there was a leftover, so the extent never advanced.)
+			if (dataNotYetWritten.length == _blockSize) {
 				//We've now written one (1) full block at the start of this extent, so remove it from the extent still to be written.
 				S(_remainderOfCurrentExtent.startBlock, L(_remainderOfCurrentExtent.startBlock) + 1);
 				S(_remainderOfCurrentExtent.blockCount, L(_remainderOfCurrentExtent.blockCount) - 1);
@@ -160,7 +164,7 @@
 		}
 	}
 
-	while (bytesWrittenSoFar >= 0 && data.length - bytesWrittenSoFar >= _blockSize) {
+	while (bytesWrittenSoFar >= 0 && data.length - (NSUInteger)bytesWrittenSoFar >= _blockSize) {
 		if (_remainderOfCurrentExtent.blockCount == 0) {
 			if (_currentExtentIndex >= _numExtents) {
 				break;
@@ -170,19 +174,20 @@
 
 		struct HFSPlusExtentDescriptor extentToWrite, extentAfterThat;
 		u_int64_t remainderBytes;
-		u_int64_t const dividendBytes = [self splitExtent:&_remainderOfCurrentExtent usingData:data intoExtent:&extentToWrite andRemainderBytes:&remainderBytes andFollowingExtent:&extentAfterThat];
+		//Split using only the data not yet written, so a write spanning more than one extent puts each part in the right place.
+		NSData *_Nonnull const remainingData = [data dangerouslyFastSubdataWithRange_Imp:(NSRange){ bytesWrittenSoFar, data.length - bytesWrittenSoFar }];
+		u_int64_t const dividendBytes = [self splitExtent:&_remainderOfCurrentExtent usingData:remainingData intoExtent:&extentToWrite andRemainderBytes:&remainderBytes andFollowingExtent:&extentAfterThat];
 
-		NSRange const rangeToWrite = { bytesWrittenSoFar, dividendBytes };
-		NSData *_Nonnull const dataToWrite = [data dangerouslyFastSubdataWithRange_Imp:rangeToWrite];
+		NSRange const rangeToWrite = { 0, dividendBytes };
+		NSData *_Nonnull const dataToWrite = [remainingData dangerouslyFastSubdataWithRange_Imp:rangeToWrite];
 
-		NSInteger bytesWrittenThisTime = [hfsPlusVol writeData:dataToWrite startingFrom:offsetIntoData toExtent:&extentToWrite error:outError];
+		NSInteger bytesWrittenThisTime = [hfsPlusVol writeData:dataToWrite startingFrom:0 toExtent:&extentToWrite error:outError];
 		if (bytesWrittenThisTime < 0) {
 			bytesWrittenSoFar = bytesWrittenThisTime;
 			break;
 		}
 
 		bytesWrittenSoFar += bytesWrittenThisTime;
-		offsetIntoData += bytesWrittenThisTime;
 		_remainderOfCurrentExtent = extentAfterThat;
 		if (extentAfterThat.blockCount == 0) {
 			++_currentExtentIndex;

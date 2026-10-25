@@ -82,7 +82,8 @@ extern NSString *_Nonnull const ImpRescuedDataFileName;
 - (NSMutableData *_Nonnull) convertHFSCatalogKeyToHFSPlus:(NSData *_Nonnull const)sourceKeyData;
 
 - (void) convertHFSVolumeHeader:(struct HFSMasterDirectoryBlock const *_Nonnull const)mdbPtr toHFSPlusVolumeHeader:(struct HFSPlusVolumeHeader *_Nonnull const)vhPtr;
-- (ImpMutableBTreeFile *_Nonnull) convertHFSCatalogFile:(ImpBTreeFile *_Nonnull const)sourceTree;
+///Returns nil, and sets outError, if any item's name can't be converted to Unicode in the source volume's text encoding.
+- (ImpMutableBTreeFile *_Nullable) convertHFSCatalogFile:(ImpBTreeFile *_Nonnull const)sourceTree error:(NSError *_Nullable *_Nonnull const)outError;
 - (void) copyFromHFSExtentsOverflowFile:(ImpBTreeFile *_Nonnull const)sourceTree toHFSPlusExtentsOverflowFile:(ImpMutableBTreeFile *_Nonnull const)destTree;
 
 ///Open files for reading and writing and do any other preflight checks before conversion begins. The abstract class implements this method. After this method returns, self.hfsVolume and self.hfsPlusVolume are non-nil.

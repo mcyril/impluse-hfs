@@ -243,7 +243,11 @@ struct APMPartitionRecord_IM5 {
 ///Returns whether this storage appears to contain an Apple Partition Map. Even if the storage contains no interesting volumes (e.g., only Apple_Free or only ProDOS or something), finding an APM is success.
 - (bool) scanApplePartitionMap {
 	NSUInteger firstPMBlock = 0;
-	NSData *_Nonnull const firstBlock = [self readOneISOStandardBlockAtIndex:0];
+	NSData *_Nullable const firstBlock = [self readOneISOStandardBlockAtIndex:0];
+	if (firstBlock == nil) {
+		//Too short to hold even one block (or unreadable). Not an Apple Partition Map.
+		return false;
+	}
 	struct APMDriverDescriptorBlock const *_Nonnull const maybeDDB = (void const *)(firstBlock.bytes);
 	switch (L(maybeDDB->signature)) {
 		case APMDriverDescriptorBlockSignature:
@@ -321,7 +325,12 @@ struct APMPartitionRecord_IM5 {
 				u_int32_t const hfsBootBlocksStartBlockIndex = L(thisPartition->thisPartitionStartBlock);
 				if (self.verbose) ImpPrintf(@"Entry #%u describes an HFS volume. First physical block (location of boot blocks) is #%u", partitionIndex, hfsBootBlocksStartBlockIndex);
 				u_int32_t const hfsVolumeHeaderBlockIndex = hfsBootBlocksStartBlockIndex + 2;
-				NSData *_Nonnull const thirdVolumeBlockData = [self readOneISOStandardBlockAtIndex:hfsVolumeHeaderBlockIndex];
+				NSData *_Nullable const thirdVolumeBlockData = [self readOneISOStandardBlockAtIndex:hfsVolumeHeaderBlockIndex];
+				if (thirdVolumeBlockData == nil) {
+					//The partition map points past the end of the source (e.g., a truncated image). Skip this partition.
+					if (self.verbose) ImpPrintf(@"Could not read the volume header of the partition in entry #%u", partitionIndex);
+					continue;
+				}
 
 				Class _Nullable identifiedClass = Nil;
 
@@ -366,7 +375,12 @@ struct APMPartitionRecord_IM5 {
 				u_int32_t const hfsBootBlocksStartBlockIndex = L(thisPartition->thisPartitionStartBlock);
 				if (self.verbose) ImpPrintf(@"Entry #%u describes an HFS volume. First physical block (location of boot blocks) is #%u", partitionIndex, hfsBootBlocksStartBlockIndex);
 				u_int32_t const hfsVolumeHeaderBlockIndex = hfsBootBlocksStartBlockIndex + 2;
-				NSData *_Nonnull const thirdVolumeBlockData = [self readOneISOStandardBlockAtIndex:hfsVolumeHeaderBlockIndex];
+				NSData *_Nullable const thirdVolumeBlockData = [self readOneISOStandardBlockAtIndex:hfsVolumeHeaderBlockIndex];
+				if (thirdVolumeBlockData == nil) {
+					//The partition map points past the end of the source (e.g., a truncated image). Skip this partition.
+					if (self.verbose) ImpPrintf(@"Could not read the volume header of the partition in entry #%u", partitionIndex);
+					continue;
+				}
 
 				Class _Nullable identifiedClass = Nil;
 
